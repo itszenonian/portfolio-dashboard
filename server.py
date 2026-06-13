@@ -2,7 +2,8 @@
 """
 Portfolio Dashboard Server — cloud-ready.
 Serves portfolio_dashboard.html, handles /refresh, and stock edits.
-Protected by HTTP Basic Auth (set DASHBOARD_USER / DASHBOARD_PASS in .env).
+Viewing (GET) is open to anyone with the URL. Data-mutating actions (POST)
+are protected by HTTP Basic Auth (set DASHBOARD_USER / DASHBOARD_PASS in .env).
 
 Usage:
     python server.py
@@ -26,6 +27,11 @@ BASE = Path(__file__).parent
 AUTH_USER = os.getenv("DASHBOARD_USER", "admin")
 AUTH_PASS = os.getenv("DASHBOARD_PASS", "changeme")
 
+# Tracks the background `generate_dashboard.py` run kicked off by /refresh,
+# so /refresh can return immediately and the page can poll for completion
+# (a long-held request can get silently dropped by NAT/proxy idle timeouts).
+_refresh_state = {'proc': None, 'log': BASE / 'refresh.log'}
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def _auth_ok(self):
@@ -47,9 +53,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if not self._auth_ok():
-            self._require_auth()
-            return
         if self.path in ('/', '/index.html'):
             html_path = BASE / 'portfolio_dashboard.html'
             if not html_path.exists():
@@ -61,6 +64,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+        elif self.path == '/market/notes':
+            notes_path = BASE / 'market_notes.json'
+            notes = json.loads(notes_path.read_text()) if notes_path.exists() else []
+            body  = json.dumps(notes).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == '/refresh-status':
+            proc = _refresh_state['proc']
+            if proc is None:
+                body = json.dumps({'done': True, 'ok': True}).encode()
+            else:
+                rc = proc.poll()
+                if rc is None:
+                    body = json.dumps({'done': False}).encode()
+                elif rc == 0:
+                    body = json.dumps({'done': True, 'ok': True}).encode()
+                else:
+                    log_path = _refresh_state['log']
+                    err = log_path.read_text()[-500:] if log_path.exists() else ''
+                    body = json.dumps({'done': True, 'ok': False, 'error': err}).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_error(404)
 
@@ -70,16 +101,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.path == '/refresh':
             try:
-                result = subprocess.run(
-                    [sys.executable, str(BASE / 'generate_dashboard.py')],
-                    capture_output=True, text=True, timeout=180
-                )
-                if result.returncode == 0:
-                    body = json.dumps({'ok': True}).encode()
+                proc = _refresh_state['proc']
+                if proc is not None and proc.poll() is None:
+                    body = json.dumps({'ok': True, 'already_running': True}).encode()
                 else:
-                    body = json.dumps({'ok': False, 'error': result.stderr[-500:]}).encode()
-            except subprocess.TimeoutExpired:
-                body = json.dumps({'ok': False, 'error': 'Timed out after 180s'}).encode()
+                    log_f = open(_refresh_state['log'], 'w')
+                    _refresh_state['proc'] = subprocess.Popen(
+                        [sys.executable, str(BASE / 'generate_dashboard.py')],
+                        stdout=log_f, stderr=subprocess.STDOUT
+                    )
+                    log_f.close()  # child keeps its own dup'd fd
+                    body = json.dumps({'ok': True, 'started': True}).encode()
             except Exception as e:
                 body = json.dumps({'ok': False, 'error': str(e)}).encode()
 
@@ -128,6 +160,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 body = json.dumps({'ok': False, 'error': str(e)}).encode()
 
+        elif self.path == '/market/note':
+            try:
+                length  = int(self.headers.get('Content-Length', 0))
+                payload = json.loads(self.rfile.read(length))
+                notes_path = BASE / 'market_notes.json'
+                notes = json.loads(notes_path.read_text()) if notes_path.exists() else []
+                entry = {
+                    'date':    payload['date'],
+                    'title':   payload.get('title', '').strip(),
+                    'content': payload.get('content', '').strip(),
+                    'saved_at': payload.get('saved_at', ''),
+                }
+                # Replace existing entry for same date or prepend
+                notes = [n for n in notes if n['date'] != entry['date']]
+                notes.insert(0, entry)
+                notes = notes[:90]  # keep last 90 days
+                notes_path.write_text(json.dumps(notes, indent=2, ensure_ascii=False))
+                body = json.dumps({'ok': True}).encode()
+            except Exception as e:
+                body = json.dumps({'ok': False, 'error': str(e)}).encode()
+
+        elif self.path == '/market/note/delete':
+            try:
+                length  = int(self.headers.get('Content-Length', 0))
+                payload = json.loads(self.rfile.read(length))
+                notes_path = BASE / 'market_notes.json'
+                notes = json.loads(notes_path.read_text()) if notes_path.exists() else []
+                notes = [n for n in notes if n['date'] != payload['date']]
+                notes_path.write_text(json.dumps(notes, indent=2, ensure_ascii=False))
+                body = json.dumps({'ok': True}).encode()
+            except Exception as e:
+                body = json.dumps({'ok': False, 'error': str(e)}).encode()
+
         elif self.path == '/weekly-update':
             try:
                 result  = subprocess.run(
@@ -159,7 +224,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 if __name__ == '__main__':
     server = http.server.HTTPServer(('0.0.0.0', PORT), Handler)
     print(f'Portfolio Dashboard → http://0.0.0.0:{PORT}')
-    print(f'Auth user: {AUTH_USER}')
+    print(f'Viewing is open. POST auth user: {AUTH_USER}')
     print('Press Ctrl+C to stop.\n')
     try:
         server.serve_forever()
