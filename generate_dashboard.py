@@ -13,7 +13,9 @@ import time
 import json
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+BANGKOK_TZ = timezone(timedelta(hours=7))
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -31,9 +33,10 @@ WALLET_954C    = os.getenv("WALLET_954C", "")
 WALLET_E64C    = os.getenv("WALLET_E64C", "")
 SCALLOP_BS_TBL = "0x8708eb23153bdc4b345c9f536fe05b62206f3f55629b26389d4fe5f129bd8368"
 OBLIGATION_CAP = "::lending_market::ObligationOwnerCap"
-CETUS_POS_TYPE = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position"
+CETUS_POS_TYPE   = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position"
+BLUEFIN_POS_TYPE = "0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c89c267::position::Position"
 
-COIN_DEC = {"USDC": 6, "USDT": 6, "DEEP": 6, "ETH": 8, "WBTC": 8, "LBTC": 8}
+COIN_DEC = {"USDC": 6, "USDT": 6, "DEEP": 6, "ETH": 8, "WBTC": 8, "LBTC": 8, "XBTC": 8}
 
 # NAVI protocol — global storage + per-reserve user_state tables
 NAVI_RESERVES_TABLE    = "0xe6d4c6610b86ce7735ea754596d71d72d10c7980b5052fc3c8cdf8d09fea9b4b"
@@ -140,7 +143,7 @@ def fetch_all_prices() -> dict[str, float]:
             r.raise_for_status()
             d = r.json()
             btc = d.get("bitcoin", {}).get("usd", 0)
-            return {
+            p = {
                 "SUI":   d.get("sui",                {}).get("usd", 0),
                 "WAL":   d.get("walrus-2",           {}).get("usd", 0),
                 "CETUS": d.get("cetus-protocol",     {}).get("usd", 0),
@@ -151,9 +154,11 @@ def fetch_all_prices() -> dict[str, float]:
                 "USDC":  1.0, "USDT": 1.0,
                 "WWAL":  d.get("walrus-2",           {}).get("usd", 0),
                 "HAWAL": d.get("walrus-2",           {}).get("usd", 0),
-                "BTC":   btc, "WBTC": btc, "LBTC": btc,
+                "BTC":   btc, "WBTC": btc, "LBTC": btc, "XBTC": btc,
+                "STSUI": d.get("sui", {}).get("usd", 0),
                 "AFSUI": d.get("aftermath-staked-sui", {}).get("usd", 0),
             }
+            return p
         except Exception:
             time.sleep(5)
     return {}
@@ -308,10 +313,50 @@ def fetch_scallop_obligation(wallet, prices):
 def decode_i32(bits):
     return bits if bits < 2**31 else bits - 2**32
 
-def fetch_cetus_clmm(wallet, sui_price):
-    found   = find_objects(wallet, CETUS_POS_TYPE.split("::")[-1])
+def _cetus_find_tick(ticks_table_id, target_bits, head_ptrs):
+    """Traverse Cetus skip list (O(log n) RPC calls) to find a tick by index bits."""
+    def get_node(node_id):
+        r = rpc("suix_getDynamicFieldObject",
+                [ticks_table_id, {"type": "u64", "value": str(node_id)}])
+        node_f = r["data"]["content"]["fields"]["value"]["fields"]
+        tick_f = node_f["value"]["fields"]
+        return {
+            "bits": int(tick_f["index"]["fields"]["bits"]),
+            "fgo_a": int(tick_f["fee_growth_outside_a"]),
+            "fgo_b": int(tick_f["fee_growth_outside_b"]),
+            "rgo":   [int(x) for x in tick_f.get("rewards_growth_outside", [])],
+            "nexts": [n["fields"] for n in node_f["nexts"]],
+        }
 
-    # also scan for the exact type
+    n_levels    = len(head_ptrs)
+    head_nexts  = [h["fields"] for h in head_ptrs]
+    current     = {"nexts": head_nexts}
+
+    def fwd(node, level):
+        nexts = node["nexts"]
+        if level >= len(nexts): return None
+        opt = nexts[level]
+        return None if opt.get("is_none", True) else int(opt["v"])
+
+    target_signed = decode_i32(target_bits)
+
+    for level in range(n_levels - 1, -1, -1):
+        while True:
+            nid = fwd(current, level)
+            if nid is None: break
+            node = get_node(nid)
+            if decode_i32(node["bits"]) < target_signed:
+                current = node
+            else:
+                break
+
+    nid = fwd(current, 0)
+    if nid is None: return None
+    node = get_node(nid)
+    return node if node["bits"] == target_bits else None
+
+
+def fetch_cetus_clmm(wallet, sui_price):
     pos_ids, cursor = [], None
     while True:
         result = rpc("suix_getOwnedObjects",
@@ -330,15 +375,20 @@ def fetch_cetus_clmm(wallet, sui_price):
         pf         = pos_obj["data"]["content"]["fields"]
         pool_id    = pf["pool"]
         liquidity  = int(pf["liquidity"])
-        tick_lower = decode_i32(int(pf["tick_lower_index"]["fields"]["bits"]))
-        tick_upper = decode_i32(int(pf["tick_upper_index"]["fields"]["bits"]))
+        tl_bits    = int(pf["tick_lower_index"]["fields"]["bits"])
+        tu_bits    = int(pf["tick_upper_index"]["fields"]["bits"])
+        tick_lower = decode_i32(tl_bits)
+        tick_upper = decode_i32(tu_bits)
         sym_a = pf["coin_type_a"]["fields"]["name"].split("::")[-1]
         sym_b = pf["coin_type_b"]["fields"]["name"].split("::")[-1]
+        pos_id = pf["id"]["id"]
 
         pool   = rpc("sui_getObject", [pool_id, {"showContent": True}])
         pool_f = pool["data"]["content"]["fields"]
         sqrt_q64     = int(pool_f["current_sqrt_price"])
         current_tick = decode_i32(int(pool_f["current_tick_index"]["fields"]["bits"]))
+        fg_a         = int(pool_f["fee_growth_global_a"])
+        fg_b         = int(pool_f["fee_growth_global_b"])
 
         def meta_dec(coin_name):
             ct   = coin_name if coin_name.startswith("0x") else "0x" + coin_name
@@ -364,16 +414,74 @@ def fetch_cetus_clmm(wallet, sui_price):
         amt_a = raw_a / 10**dec_a
         amt_b = raw_b / 10**dec_b
 
-        dec_adj       = 10**dec_a / 10**dec_b
+        dec_adj         = 10**dec_a / 10**dec_b
         price_sui_per_a = (sqrt_P ** 2) * dec_adj
-        price_now     = 1 / price_sui_per_a
-        p_lower       = 1 / ((1.0001 ** tick_upper) * dec_adj)
-        p_upper       = 1 / ((1.0001 ** tick_lower) * dec_adj)
+        price_now       = 1 / price_sui_per_a
+        p_lower         = 1 / ((1.0001 ** tick_upper) * dec_adj)
+        p_upper         = 1 / ((1.0001 ** tick_lower) * dec_adj)
 
-        price_a_usd = 1.0        # USDSUI stablecoin
+        price_a_usd = 1.0
         price_b_usd = sui_price
         total_usd   = amt_a * price_a_usd + amt_b * price_b_usd
         in_range    = tick_lower <= current_tick <= tick_upper
+
+        # ── Fees (Q64) via PositionInfo + tick traversal ──────────────
+        fee_a = fee_b = 0.0
+        rewards = []
+        try:
+            Q64 = 2**64; Q128 = 2**128
+
+            # PositionInfo from pool's position_manager
+            pm_table = pool_f["position_manager"]["fields"]["positions"]["fields"]["id"]["id"]
+            pi = rpc("suix_getDynamicFieldObject",
+                     [pm_table, {"type": "0x2::object::ID", "value": pos_id}])
+            pi_f = pi["data"]["content"]["fields"]["value"]["fields"]["value"]["fields"]
+
+            pos_fga   = int(pi_f["fee_growth_inside_a"])
+            pos_fgb   = int(pi_f["fee_growth_inside_b"])
+            fee_owned_a = int(pi_f["fee_owned_a"])
+            fee_owned_b = int(pi_f["fee_owned_b"])
+
+            # Tick data via skip list traversal
+            ticks_table = pool_f["tick_manager"]["fields"]["ticks"]["fields"]["id"]["id"]
+            head_ptrs   = pool_f["tick_manager"]["fields"]["ticks"]["fields"]["head"]
+            lower_tick  = _cetus_find_tick(ticks_table, tl_bits, head_ptrs)
+            upper_tick  = _cetus_find_tick(ticks_table, tu_bits, head_ptrs)
+
+            fgo_la = lower_tick["fgo_a"] if lower_tick else 0
+            fgo_lb = lower_tick["fgo_b"] if lower_tick else 0
+            fgo_ua = upper_tick["fgo_a"] if upper_tick else 0
+            fgo_ub = upper_tick["fgo_b"] if upper_tick else 0
+            rgo_l  = lower_tick["rgo"]   if lower_tick else []
+            rgo_u  = upper_tick["rgo"]   if upper_tick else []
+
+            fb_a = fgo_la if current_tick >= tick_lower else (fg_a - fgo_la) % Q128
+            fb_b = fgo_lb if current_tick >= tick_lower else (fg_b - fgo_lb) % Q128
+            fa_a = fgo_ua if current_tick <  tick_upper else (fg_a - fgo_ua) % Q128
+            fa_b = fgo_ub if current_tick <  tick_upper else (fg_b - fgo_ub) % Q128
+            fgi_a = (fg_a - fb_a - fa_a) % Q128
+            fgi_b = (fg_b - fb_b - fa_b) % Q128
+
+            fee_a = (((fgi_a - pos_fga) % Q128) * liquidity // Q64 + fee_owned_a) / 10**dec_a
+            fee_b = (((fgi_b - pos_fgb) % Q128) * liquidity // Q64 + fee_owned_b) / 10**dec_b
+
+            # Rewards (SUI rewarder)
+            rm     = pool_f["rewarder_manager"]["fields"]
+            for i, rewarder in enumerate(rm.get("rewarders", [])):
+                rf       = rewarder["fields"]
+                rgg      = int(rf["growth_global"])
+                rsym     = rf["reward_coin"]["fields"]["name"].split("::")[-1]
+                pos_ri   = pi_f["rewards"][i]["fields"] if i < len(pi_f.get("rewards", [])) else {}
+                amt_owned = int(pos_ri.get("amount_owned", 0))
+                last_g    = int(pos_ri.get("growth_inside", 0))
+                r_below   = rgo_l[i] if current_tick >= tick_lower and i < len(rgo_l) else (rgg - rgo_l[i]) % Q128 if i < len(rgo_l) else 0
+                r_above   = rgo_u[i] if current_tick <  tick_upper and i < len(rgo_u) else (rgg - rgo_u[i]) % Q128 if i < len(rgo_u) else 0
+                rgi       = (rgg - r_below - r_above) % Q128
+                pending   = ((rgi - last_g) % Q128) * liquidity // Q64 + amt_owned
+                if pending > 0:
+                    rewards.append({"sym": rsym, "amount": pending / 10**9, "usd": pending / 10**9 * sui_price})
+        except Exception:
+            pass
 
         results.append({
             "name":      pf.get("name", f"{sym_b}/{sym_a}"),
@@ -383,6 +491,152 @@ def fetch_cetus_clmm(wallet, sui_price):
             "usd_a":     amt_a * price_a_usd,
             "usd_b":     amt_b * price_b_usd,
             "total_usd": total_usd,
+            "fee_a":     fee_a,  "fee_a_usd": fee_a * price_a_usd,
+            "fee_b":     fee_b,  "fee_b_usd": fee_b * price_b_usd,
+            "fee_usd":   fee_a * price_a_usd + fee_b * price_b_usd,
+            "rewards":   rewards,
+            "rewards_usd": sum(r["usd"] for r in rewards),
+            "price_now": price_now,
+            "p_lower":   p_lower,
+            "p_upper":   p_upper,
+            "in_range":  in_range,
+        })
+    return results
+
+
+# ── Bluefin CLMM (wallet_e64c) ────────────────────────────────────────────────
+
+def fetch_bluefin_clmm(wallet, prices):
+    pos_ids, cursor = [], None
+    while True:
+        result = rpc("suix_getOwnedObjects",
+            [wallet, {"options": {"showType": True}}, cursor, 50])
+        for obj in result.get("data", []):
+            if obj.get("data", {}).get("type", "") == BLUEFIN_POS_TYPE:
+                pos_ids.append(obj["data"]["objectId"])
+        if not result.get("hasNextPage"): break
+        cursor = result.get("nextCursor")
+    if not pos_ids: return []
+
+    positions = multi_get(pos_ids)
+    results   = []
+    for pos_obj in positions:
+        if not pos_obj.get("data"): continue
+        pf         = pos_obj["data"]["content"]["fields"]
+        pool_id    = pf["pool_id"]
+        liquidity  = int(pf["liquidity"])
+        tick_lower = decode_i32(int(pf["lower_tick"]["fields"]["bits"]))
+        tick_upper = decode_i32(int(pf["upper_tick"]["fields"]["bits"]))
+
+        # coin types are plain strings (not nested objects like Cetus)
+        ct_a   = pf["coin_type_a"]
+        ct_b   = pf["coin_type_b"]
+        sym_a  = ct_a.split("::")[-1]
+        sym_b  = ct_b.split("::")[-1]
+
+        pool     = rpc("sui_getObject", [pool_id, {"showContent": True}])
+        pool_f   = pool["data"]["content"]["fields"]
+        sqrt_q64     = int(pool_f["current_sqrt_price"])
+        current_tick = decode_i32(int(pool_f["current_tick_index"]["fields"]["bits"]))
+        fg_a         = int(pool_f["fee_growth_global_coin_a"])
+        fg_b         = int(pool_f["fee_growth_global_coin_b"])
+        pool_rwds    = pool_f.get("reward_infos", [])
+        tick_table   = pool_f["ticks_manager"]["fields"]["ticks"]["fields"]["id"]["id"]
+
+        def meta_dec(ct):
+            full = ct if ct.startswith("0x") else "0x" + ct
+            meta = rpc("suix_getCoinMetadata", [full])
+            return int(meta["decimals"]) if meta else COIN_DEC.get(ct.split("::")[-1].upper(), 9)
+
+        dec_a = meta_dec(ct_a)
+        dec_b = meta_dec(ct_b)
+
+        sqrt_P       = sqrt_q64 / 2**64
+        sqrt_P_lower = math.sqrt(1.0001 ** tick_lower)
+        sqrt_P_upper = math.sqrt(1.0001 ** tick_upper)
+
+        if tick_lower <= current_tick <= tick_upper:
+            raw_a = liquidity * (sqrt_P_upper - sqrt_P) / (sqrt_P * sqrt_P_upper)
+            raw_b = liquidity * (sqrt_P - sqrt_P_lower)
+        elif current_tick < tick_lower:
+            raw_a = liquidity * (sqrt_P_upper - sqrt_P_lower) / (sqrt_P_lower * sqrt_P_upper)
+            raw_b = 0.0
+        else:
+            raw_a, raw_b = 0.0, liquidity * (sqrt_P_upper - sqrt_P_lower)
+
+        amt_a = raw_a / 10**dec_a
+        amt_b = raw_b / 10**dec_b
+
+        price_a_usd = prices.get(sym_a, 0)
+        price_b_usd = prices.get(sym_b, 0)
+        total_usd   = amt_a * price_a_usd + amt_b * price_b_usd
+
+        dec_adj   = 10**dec_a / 10**dec_b
+        price_now = (sqrt_P ** 2) * dec_adj
+        p_lower   = (1.0001 ** tick_lower) * dec_adj
+        p_upper   = (1.0001 ** tick_upper) * dec_adj
+        in_range  = tick_lower <= current_tick <= tick_upper
+
+        # Fetch tick data for fee_growth_inside and reward_growths_inside
+        i32_type = "0x714a63a0dba6da4f017b42d5d0fb78867f18bcde904868e51d951a5a6f5b7f57::i32::I32"
+        tl_bits  = int(pf["lower_tick"]["fields"]["bits"])
+        tu_bits  = int(pf["upper_tick"]["fields"]["bits"])
+        def get_tick(bits):
+            r = rpc("suix_getDynamicFieldObject", [tick_table, {"type": i32_type, "value": {"bits": bits}}])
+            f = r["data"]["content"]["fields"]["value"]["fields"]
+            return (int(f["fee_growth_outside_a"]), int(f["fee_growth_outside_b"]),
+                    [int(x) for x in f.get("reward_growths_outside", [])])
+        fgo_la, fgo_lb, rgo_l = get_tick(tl_bits)
+        fgo_ua, fgo_ub, rgo_u = get_tick(tu_bits)
+
+        Q128 = 2**128
+        fb_a = fgo_la if current_tick >= tick_lower else (fg_a - fgo_la) % Q128
+        fb_b = fgo_lb if current_tick >= tick_lower else (fg_b - fgo_lb) % Q128
+        fa_a = fgo_ua if current_tick <  tick_upper else (fg_a - fgo_ua) % Q128
+        fa_b = fgo_ub if current_tick <  tick_upper else (fg_b - fgo_ub) % Q128
+        fgi_a = (fg_a - fb_a - fa_a) % Q128
+        fgi_b = (fg_b - fb_b - fa_b) % Q128
+
+        Q64       = 2**64
+        fee_a_raw = ((fgi_a - int(pf["fee_growth_coin_a"])) % Q128) * liquidity // Q64 + int(pf.get("token_a_fee", 0))
+        fee_b_raw = ((fgi_b - int(pf["fee_growth_coin_b"])) % Q128) * liquidity // Q64 + int(pf.get("token_b_fee", 0))
+        fee_a     = fee_a_raw / 10**dec_a
+        fee_b     = fee_b_raw / 10**dec_b
+        fee_a_usd = fee_a * price_a_usd
+        fee_b_usd = fee_b * price_b_usd
+
+        # Protocol rewards (Q64 scaling)
+        rewards = []
+        for i, ri in enumerate(pf.get("reward_infos", [])):
+            if i >= len(pool_rwds): break
+            prf         = pool_rwds[i]["fields"]
+            rgg         = int(prf["reward_growth_global"])
+            rdec        = int(prf["reward_coin_decimals"])
+            rsym        = prf["reward_coin_symbol"]
+            rprice      = prices.get(rsym.upper(), 0)
+            coins_owed  = int(ri["fields"]["coins_owed_reward"])
+            last_growth = int(ri["fields"]["reward_growth_inside_last"])
+            r_below = rgo_l[i] if current_tick >= tick_lower else (rgg - rgo_l[i]) % Q128
+            r_above = rgo_u[i] if current_tick <  tick_upper else (rgg - rgo_u[i]) % Q128
+            rgi     = (rgg - r_below - r_above) % Q128
+            pending = ((rgi - last_growth) % Q128) * liquidity // Q64 + coins_owed
+            amt     = pending / 10**rdec
+            if amt > 0:
+                rewards.append({"sym": rsym, "amount": amt, "usd": amt * rprice})
+
+        results.append({
+            "name":      pf.get("name", f"{sym_a}/{sym_b}"),
+            "pool_id":   pool_id,
+            "sym_a":     sym_a, "sym_b": sym_b,
+            "amt_a":     amt_a, "amt_b": amt_b,
+            "usd_a":     amt_a * price_a_usd,
+            "usd_b":     amt_b * price_b_usd,
+            "total_usd": total_usd,
+            "fee_a":     fee_a,     "fee_a_usd": fee_a_usd,
+            "fee_b":     fee_b,     "fee_b_usd": fee_b_usd,
+            "fee_usd":   fee_a_usd + fee_b_usd,
+            "rewards":   rewards,
+            "rewards_usd": sum(r["usd"] for r in rewards),
             "price_now": price_now,
             "p_lower":   p_lower,
             "p_upper":   p_upper,
@@ -393,8 +647,15 @@ def fetch_cetus_clmm(wallet, sui_price):
 
 # ── Aftermath Finance: SUI/USDC 80/20 staked LP ──────────────────────────────
 
+_AFTERMATH_8020_ZERO = {
+    "total": 0.0, "usdc_amt": 0.0, "usdc_usd": 0.0,
+    "sui_amt": 0.0, "sui_usd": 0.0, "afsui_amt": 0.0, "afsui_usd": 0.0, "lp_frac": 0.0,
+}
+
 def fetch_aftermath_sui_usdc(sui_price: float, afsui_price: float) -> dict:
     sp = rpc("sui_getObject", [AFTER_SUIUSDC_STAKE_ID, {"showContent": True}])
+    if not sp.get("data"):
+        return _AFTERMATH_8020_ZERO
     sf = sp["data"]["content"]["fields"]
     user_lp     = int(sf["balance"])
     base_acc    = int(sf["base_rewards_accumulated"][0])
@@ -486,6 +747,16 @@ def fetch_aftermath_lbtcwbtc(btc_price: float, deep_price: float) -> dict:
         "lp_frac":  lp_frac,
         "total":    wbtc_usd + lbtc_usd + deep_usd,
     }
+
+
+# ── Lending rewards (wallet reward coins) ────────────────────────────────────
+
+def fetch_lending_rewards(wallet, prices):
+    """Placeholder — lending protocol rewards (NAVX/SEND/SCA) require complex
+    protocol-specific incentive math that isn't implemented yet."""
+    return {"navi": {"amount": 0, "usd": 0, "sym": "NAVX"},
+            "send": {"amount": 0, "usd": 0, "sym": "SEND"},
+            "sca":  {"amount": 0, "usd": 0, "sym": "SCA"}}
 
 
 # ── NAVI (RPC) ───────────────────────────────────────────────────────────────
@@ -1000,52 +1271,55 @@ def _health_bar_html(ltv_bar, hf=None):
 
 def _build_positions(data, p):
     """Build normalized position list used for cards + modals."""
-    a  = data["amm_8020"]
-    b  = data["amm_5050"]
-    n  = data["navi"]
-    sl = data["suilend"]
-    oc = data["onchain_954c"]
+    a   = data["amm_8020"]
+    b   = data["amm_5050"]
+    n   = data["navi"]
+    sl  = data["suilend"]
+    oc  = data["onchain_954c"]
+    lrw = data.get("lending_rewards", {})
     positions = []
 
-    # 1. Aftermath 80/20
-    positions.append({
-        "id": "aftermath", "title": "USDC / SUI  80/20",
-        "protocol": "Aftermath", "color": "#f97316",
-        "category": "AMM", "badge": "Weighted AMM", "total": a["total"],
-        "auto": True,
-        "card_rows": [
-            ("USDC", f"{a['usdc_amt']:,.2f}", False),
-            ("SUI",  f"{a['sui_amt']:,.4f}",  False),
-        ],
-        "modal_tokens": [
-            {"sym": "USDC",  "amount": a["usdc_amt"],  "usd": a["usdc_usd"]},
-            {"sym": "SUI",   "amount": a["sui_amt"],   "usd": a["sui_usd"]},
-            {"sym": "afSUI", "amount": a["afsui_amt"], "usd": a["afsui_usd"], "note": "pending reward"},
-        ],
-        "stats": [
-            {"label": "LP Share", "value": f"{a['lp_frac']:.2%}",       "color": "#94a3b8"},
-            {"label": "Weights",  "value": "80% USDC / 20% SUI",         "color": "#94a3b8"},
-            {"label": "Reward",   "value": f"{a['afsui_amt']:.4f} afSUI","color": "#60a5fa"},
-        ],
-        "range_info": None, "status": None, "status_color": None,
-    })
+    # 1. Aftermath 80/20 (only show if position still open)
+    if a["total"] > 0:
+        positions.append({
+            "id": "aftermath", "title": "USDC / SUI  80/20",
+            "protocol": "Aftermath", "color": "#f97316",
+            "category": "AMM", "badge": "Weighted AMM", "total": a["total"],
+            "auto": True,
+            "card_rows": [
+                ("USDC", f"{a['usdc_amt']:,.2f}", False),
+                ("SUI",  f"{a['sui_amt']:,.4f}",  False),
+            ],
+            "modal_tokens": [
+                {"sym": "USDC",  "amount": a["usdc_amt"],  "usd": a["usdc_usd"]},
+                {"sym": "SUI",   "amount": a["sui_amt"],   "usd": a["sui_usd"]},
+                {"sym": "afSUI", "amount": a["afsui_amt"], "usd": a["afsui_usd"], "note": "pending reward"},
+            ],
+            "stats": [
+                {"label": "LP Share", "value": f"{a['lp_frac']:.2%}",       "color": "#94a3b8"},
+                {"label": "Weights",  "value": "80% USDC / 20% SUI",         "color": "#94a3b8"},
+                {"label": "Reward",   "value": f"{a['afsui_amt']:.4f} afSUI","color": "#60a5fa"},
+            ],
+            "range_info": None, "status": None, "status_color": None,
+        })
 
-    # 2. SteammFi 50/50 (live data from fetch_suilend)
-    positions.append({
-        "id": "steammfi", "title": "WAL / USDC  50/50",
-        "protocol": "SteammFi", "color": "#06b6d4",
-        "category": "AMM", "badge": "Constant Product", "total": b["total"],
-        "auto": True,
-        "card_rows": [
-            ("USDC", f"{b['stable']:,.2f}", False),
-            ("WAL",  f"{b['risky']:,.4f}",  False),
-        ],
-        "modal_tokens": [
-            {"sym": "USDC", "amount": b["stable"], "usd": b["stable"]},
-            {"sym": "WAL",  "amount": b["risky"],  "usd": b["risky"] * p.get("WAL", 0)},
-        ],
-        "stats": [], "range_info": None, "status": None, "status_color": None,
-    })
+    # 2. SteammFi 50/50 (only show if position still open)
+    if b["total"] > 0:
+        positions.append({
+            "id": "steammfi", "title": "WAL / USDC  50/50",
+            "protocol": "SteammFi", "color": "#06b6d4",
+            "category": "AMM", "badge": "Constant Product", "total": b["total"],
+            "auto": True,
+            "card_rows": [
+                ("USDC", f"{b['stable']:,.2f}", False),
+                ("WAL",  f"{b['risky']:,.4f}",  False),
+            ],
+            "modal_tokens": [
+                {"sym": "USDC", "amount": b["stable"], "usd": b["stable"]},
+                {"sym": "WAL",  "amount": b["risky"],  "usd": b["risky"] * p.get("WAL", 0)},
+            ],
+            "stats": [], "range_info": None, "status": None, "status_color": None,
+        })
 
     # 3. NAVI
     positions.append({
@@ -1062,7 +1336,10 @@ def _build_positions(data, p):
             {"sym": "SUI",    "amount": n["sui_equiv"],  "usd": n["sui_equiv"] * p.get("SUI", 1), "dim": True, "note": "equiv"},
             {"sym": "USDsui", "amount": n["debt"],       "usd": n["debt_usd"], "is_debt": True},
         ],
-        "stats": [],
+        "stats": (
+            [{"label": "NAVX Reward", "value": f"{lrw['navi']['amount']:.2f} (${lrw['navi']['usd']:.2f})", "color": "#60a5fa"}]
+            if lrw.get("navi", {}).get("amount", 0) > 0 else []
+        ),
         "ltv_bar": {"current": n["ltv"], "max_ltv": 0.75, "liq_threshold": 0.80},
         "hf_bar":  n["hf"],
         "range_info": None, "status": None, "status_color": None,
@@ -1088,7 +1365,10 @@ def _build_positions(data, p):
         "auto": True,
         "card_rows": sl_card_rows,
         "modal_tokens": sl_modal_tokens,
-        "stats": [],
+        "stats": (
+            [{"label": "SEND Reward", "value": f"{lrw['send']['amount']:.2f} (${lrw['send']['usd']:.2f})", "color": "#60a5fa"}]
+            if lrw.get("send", {}).get("amount", 0) > 0 else []
+        ),
         "ltv_bar": {"current": sl["ltv"], "max_ltv": sl["max_ltv"], "liq_threshold": sl["liq_threshold"]},
         "hf_bar":  sl["health_factor"],
         "range_info": None, "status": None, "status_color": None,
@@ -1145,7 +1425,11 @@ def _build_positions(data, p):
         "total": oc["sc_net"],
         "card_rows": sc_card_rows[:4],
         "modal_tokens": sc_modal,
-        "stats": [], "range_info": None, "status": None, "status_color": None,
+        "stats": (
+            [{"label": "SCA Reward", "value": f"{lrw['sca']['amount']:.2f} (${lrw['sca']['usd']:.2f})", "color": "#60a5fa"}]
+            if lrw.get("sca", {}).get("amount", 0) > 0 else []
+        ),
+        "range_info": None, "status": None, "status_color": None,
     })
 
     # 8. Aftermath LBTC/lzWBTC
@@ -1190,11 +1474,61 @@ def _build_positions(data, p):
             "modal_tokens": [
                 {"sym": pos["sym_a"], "amount": pos["amt_a"], "usd": pos["usd_a"]},
                 {"sym": pos["sym_b"], "amount": pos["amt_b"], "usd": pos["usd_b"]},
+                *([{"sym": pos["sym_a"], "amount": pos["fee_a"], "usd": pos["fee_a_usd"], "note": "fees earned"}] if pos.get("fee_a", 0) > 0 else []),
+                *([{"sym": pos["sym_b"], "amount": pos["fee_b"], "usd": pos["fee_b_usd"], "note": "fees earned"}] if pos.get("fee_b", 0) > 0 else []),
+                *([{"sym": r["sym"], "amount": r["amount"], "usd": r["usd"], "note": "rewards"} for r in pos.get("rewards", [])]),
             ],
-            "stats": [],
+            "stats": [
+                *([ {"label": f"{pos['sym_a']} Fee", "value": f"{pos['fee_a']:.4f}", "color": "#10b981"} ] if pos.get("fee_a", 0) > 0 else []),
+                *([ {"label": f"{pos['sym_b']} Fee", "value": f"{pos['fee_b']:.4f}", "color": "#10b981"} ] if pos.get("fee_b", 0) > 0 else []),
+                *([ {"label": f"{r['sym']} Reward", "value": f"{r['amount']:.4f}", "color": "#60a5fa"} for r in pos.get("rewards", []) ]),
+            ],
             "range_info": f"Range  {pos['p_lower']:.4f} — {pos['p_upper']:.4f}  |  Now {pos['price_now']:.4f}",
             "status": "IN RANGE" if pos["in_range"] else "OUT OF RANGE",
             "status_color": sc2,
+        })
+
+    # 9b. Bluefin CLMM e64c
+    def _fmt_price(v):
+        if v >= 1000: return f"{v:,.2f}"
+        if v >= 1:    return f"{v:.4f}"
+        return f"{v:.6f}"
+
+    _SYM_DISPLAY = {"XBTC": "BTC"}
+    for i, pos in enumerate(data["bluefin_clmm"]):
+        sc = "#10b981" if pos["in_range"] else "#ef4444"
+        disp_a = _SYM_DISPLAY.get(pos["sym_a"], pos["sym_a"])
+        disp_b = _SYM_DISPLAY.get(pos["sym_b"], pos["sym_b"])
+        positions.append({
+            "id": f"bluefin_e64c_{i}",
+            "title": f"{disp_a}/{disp_b}  CLMM",
+            "protocol": "Bluefin", "color": "#3b82f6",
+            "category": "AMM", "badge": "Concentrated",
+            "auto": True,
+            "total": pos["total_usd"],
+            "card_rows": [
+                (disp_a, f"{pos['amt_a']:,.6f}", False),
+                (disp_b, f"{pos['amt_b']:,.2f}", False),
+            ],
+            "modal_tokens": [
+                {"sym": disp_a, "amount": pos["amt_a"], "usd": pos["usd_a"]},
+                {"sym": disp_b, "amount": pos["amt_b"], "usd": pos["usd_b"]},
+                *([{"sym": disp_a, "amount": pos["fee_a"], "usd": pos["fee_a_usd"], "note": "fees earned"}] if pos["fee_a"] > 0 else []),
+                *([{"sym": disp_b, "amount": pos["fee_b"], "usd": pos["fee_b_usd"], "note": "fees earned"}] if pos["fee_b"] > 0 else []),
+                *([{"sym": r["sym"], "amount": r["amount"], "usd": r["usd"], "note": "rewards"} for r in pos["rewards"]]),
+            ],
+            "stats": [
+                *([ {"label": f"{disp_a} Fee", "value": f"{pos['fee_a']:.6f}", "color": "#10b981"} ] if pos["fee_a"] > 0 else []),
+                *([ {"label": f"{disp_b} Fee", "value": f"{pos['fee_b']:.4f}", "color": "#10b981"} ] if pos["fee_b"] > 0 else []),
+                *([ {"label": f"{r['sym']} Reward", "value": f"{r['amount']:.4f}", "color": "#60a5fa"} for r in pos["rewards"] ]),
+            ],
+            "range_info": (
+                f"Range  {_fmt_price(pos['p_lower'])} — {_fmt_price(pos['p_upper'])}"
+                f"  |  Now {_fmt_price(pos['price_now'])}"
+                f"  {disp_b}/{disp_a}"
+            ),
+            "status": "IN RANGE" if pos["in_range"] else "OUT OF RANGE",
+            "status_color": sc,
         })
 
     # 10. Ember eBLUE (Staking)
@@ -1367,13 +1701,13 @@ def _modal_content(pos):
     if pos.get("ltv_bar"):
         inner = _health_bar_html(pos["ltv_bar"], pos.get("hf_bar"))
         stats_html = f'<div class="md-ltv">{inner}</div>'
-    elif pos.get("stats"):
+    if pos.get("stats"):
         items = "".join(
             f'<div class="ls-item"><span>{s["label"]}</span>'
-            f'<span style="color:{s["color"]}">{s["value"]}</span></div>'
+            f'<span class="priv" style="color:{s["color"]}">{s["value"]}</span></div>'
             for s in pos["stats"]
         )
-        stats_html = f'<div class="md-stats">{items}</div>'
+        stats_html += f'<div class="md-stats">{items}</div>'
     return (
         f'<div class="md-header">'
         f'<div>'
@@ -1401,7 +1735,7 @@ def _build_token_totals(data, p):
     sui_p       = p.get("SUI", 1)
     afsui_ratio = p.get("AFSUI", sui_p) / sui_p
 
-    _NORM = {"WBTC": "BTC", "LBTC": "BTC", "HAWAL": "WAL", "WWAL": "WAL",
+    _NORM = {"WBTC": "BTC", "LBTC": "BTC", "XBTC": "BTC", "HAWAL": "WAL", "WWAL": "WAL",
              "USDSUI": "USDC", "USDT": "USDC", "AFSUI": "SUI"}
     _RATIO = {
         "USDSUI": p.get("USDSUI", 1.0),
@@ -1460,6 +1794,9 @@ def _build_token_totals(data, p):
     for pos in data["clmm_e64c"]:
         add(assets, pos["sym_a"], pos["amt_a"], pos["usd_a"])
         add(assets, pos["sym_b"], pos["amt_b"], pos["usd_b"])
+    for pos in data["bluefin_clmm"]:
+        add(assets, pos["sym_a"], pos["amt_a"], pos["usd_a"])
+        add(assets, pos["sym_b"], pos["amt_b"], pos["usd_b"])
 
     # Ember eBLUE
     ember = data.get("ember", {})
@@ -1500,23 +1837,23 @@ def _stock_card(s):
     name_esc = s.get("name", s["ticker"]).replace("'", "\\'")
     onclick  = f"openStockEdit('{s['ticker']}',{s['shares']},{s['avg_cost']},'{s.get('currency','USD')}','{name_esc}')"
     return (
-        f'<div class="pos-card" style="border-top:3px solid {color};cursor:pointer" onclick="{onclick}">'
+        f'<div class="pos-card stock-card" style="border-top:3px solid {color};cursor:pointer" onclick="{onclick}">'
         f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">'
         f'<div>'
-        f'<div style="font-weight:700;font-size:.95rem;color:#f1f5f9">{s["ticker"]}</div>'
+        f'<div class="priv" style="font-weight:700;font-size:.95rem;color:#f1f5f9">{s["ticker"]}</div>'
         f'<div style="font-size:.68rem;color:#64748b">{exch} &middot; {stype}</div>'
         f'</div>'
         f'<div style="text-align:right">'
-        f'<div style="font-size:.82rem;font-weight:600;color:#f1f5f9">${s.get("market_value",0):,.0f}</div>'
-        f'<div style="font-size:.64rem;color:{gc}">{gsign}{gain:.1f}%</div>'
+        f'<div class="priv" style="font-size:.82rem;font-weight:600;color:#f1f5f9">${s.get("market_value",0):,.0f}</div>'
+        f'<div class="priv" style="font-size:.64rem;color:{gc}">{gsign}{gain:.1f}%</div>'
         f'</div></div>'
-        f'<div style="font-size:.72rem;color:#94a3b8;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+        f'<div class="priv" style="font-size:.72rem;color:#94a3b8;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
         f'{s.get("name", s["ticker"])}</div>'
         f'<div style="display:flex;justify-content:space-between;font-size:.72rem">'
-        f'<span style="color:#64748b">{s["shares"]:,.2f} sh @ {csym}{s["avg_cost"]:,.2f}</span>'
-        f'<span style="color:{dc}">{dsign}{daily:.1f}%<span style="color:#475569"> 1d</span></span>'
+        f'<span class="priv" style="color:#64748b">{s["shares"]:,.2f} sh @ {csym}{s["avg_cost"]:,.2f}</span>'
+        f'<span class="priv" style="color:{dc}">{dsign}{daily:.1f}%<span style="color:#475569"> 1d</span></span>'
         f'</div>'
-        f'<div style="font-size:.68rem;color:#6366f1;font-weight:600;margin-top:4px">&#9998; Edit</div>'
+        f'<div class="pc-edit-hint" style="font-size:.68rem;color:#4da2ff;font-weight:600;margin-top:4px">&#9998; Edit</div>'
         f'</div>'
     )
 
@@ -1549,6 +1886,7 @@ def build_html(data):
     sl_deposits_no_lp = [d for d in sl["deposits"] if "SteammFi LP" not in d.get("sym", "")]
     gross = (
         data["amm_8020"]["total"] + data["amm_5050"]["total"] + data["clmm_e64c_total"] +
+        data["bluefin_clmm_total"] +
         af["total"] +
         n["col_usd"] +
         sum(d["usd"] for d in sl_deposits_no_lp) +
@@ -1687,42 +2025,58 @@ def build_html(data):
     ]
     chart_colors = ["#f97316", "#3b82f6", "#10b981", "#eab308", "#6366f1"]
 
-    proto_labels = ["Aftermath 80/20", "Aftermath LBTC/WBTC", "SteammFi 50/50",
-                    "NAVI", "Suilend", "Walrus", "xCETUS", "Scallop"]
-    proto_values = [
-        round(data["amm_8020"]["total"], 2), round(af["total"], 2),
-        round(data["amm_5050"]["total"], 2),
-        round(n["net"], 2), round(sl["net"], 2),
-        round(oc["wal_usd"], 2), round(oc["xcetus_usd"], 2), round(oc["sc_net"], 2),
-    ]
-    for pos in data["clmm_e64c"]:
-        proto_labels.insert(3, f"Cetus CLMM ({pos['sym_b']}/{pos['sym_a']})")
-        proto_values.insert(3, round(pos["total_usd"], 2))
+    # Protocol color map — each protocol's own brand color
+    _PROTO_COLOR = {
+        "Aftermath":  "#62FFD0",
+        "SteammFi":   "#1DF2C9",
+        "Cetus":      "#1DF2C9",
+        "Bluefin":    "#2A5ADA",
+        "NAVI":       "#0DC3A4",
+        "Suilend":    "#EA4630",
+        "Walrus":     "#6800FF",
+        "Scallop":    "#2563EB",
+        "Ember":      "#60CA9C",
+        "Zentry":     "#a855f7",
+        "Binance":    "#F0B90B",
+        "Stocks":     "#6366f1",
+    }
+    _proto_agg = {}  # label → (value, color)
+
+    def _padd(label, value, proto_key=None):
+        color = _PROTO_COLOR.get(proto_key or label, "#94a3b8")
+        _proto_agg[label] = (_proto_agg.get(label, (0, color))[0] + value, color)
+
+    _padd("Aftermath", round(af["total"] + data["amm_8020"]["total"], 2), "Aftermath")
+    if data["amm_5050"]["total"] > 0:
+        _padd("SteammFi", round(data["amm_5050"]["total"], 2), "SteammFi")
+    cetus_total = sum(pos["total_usd"] for pos in data["clmm_e64c"])
+    if cetus_total > 0:
+        _padd("Cetus", round(cetus_total, 2), "Cetus")
+    bluefin_total = sum(pos["total_usd"] for pos in data["bluefin_clmm"])
+    if bluefin_total > 0:
+        _padd("Bluefin", round(bluefin_total, 2), "Bluefin")
+    _padd("NAVI",    round(n["net"], 2),        "NAVI")
+    _padd("Suilend", round(sl["net"], 2),       "Suilend")
+    _padd("Walrus",  round(oc["wal_usd"], 2),   "Walrus")
+    _padd("Cetus",   round(oc["xcetus_usd"], 2),"Cetus")
+    _padd("Scallop", round(oc["sc_net"], 2),    "Scallop")
     ember_usd = data.get("ember", {}).get("blue_usd", 0)
     if ember_usd > 0:
-        proto_labels.append("Ember eBLUE")
-        proto_values.append(round(ember_usd, 2))
+        _padd("Ember", round(ember_usd, 2), "Ember")
     stzent_usd = data.get("stzent", {}).get("zent_usd", 0)
     if stzent_usd > 0:
-        proto_labels.append("stZENT")
-        proto_values.append(round(stzent_usd, 2))
+        _padd("Zentry", round(stzent_usd, 2), "Zentry")
     if cex_total > 0:
-        proto_labels.append("Binance Futures")
-        proto_values.append(round(cex_total, 2))
-    if lending_bn != 0:
-        proto_labels.append("Binance Loan")
-        proto_values.append(round(lending_bn, 2))
+        _padd("Binance", round(cex_total + (lending_bn or 0), 2), "Binance")
+    elif lending_bn != 0:
+        _padd("Binance", round(lending_bn, 2), "Binance")
     if stocks_total > 0:
-        proto_labels.append("Stocks")
-        proto_values.append(round(stocks_total, 2))
+        _padd("Stocks", round(stocks_total, 2), "Stocks")
 
-    proto_colors = ["#f97316","#fb923c","#06b6d4","#8b5cf6","#3b82f6","#f59e0b",
-                    "#14b8a6","#a78bfa","#ec4899","#6366f1","#10b981","#eab308",
-                    "#a855f7","#22d3ee","#84cc16"]
-    proto_sorted   = sorted(zip(proto_values, proto_labels, proto_colors[:len(proto_values)]), reverse=True)
-    proto_values   = [x[0] for x in proto_sorted]
-    proto_labels   = [x[1] for x in proto_sorted]
-    proto_colors   = [x[2] for x in proto_sorted]
+    proto_sorted = sorted(_proto_agg.items(), key=lambda x: x[1][0], reverse=True)
+    proto_labels = [x[0]    for x in proto_sorted]
+    proto_values = [x[1][0] for x in proto_sorted]
+    proto_colors = [x[1][1] for x in proto_sorted]
 
     # ── Page 1: allocation bars
     categories = sorted([
@@ -1809,12 +2163,12 @@ def build_html(data):
         int_rows += (
             f'<tr>'
             f'<td style="color:#94a3b8;font-size:.78rem">{lbl}</td>'
-            f'<td style="text-align:right;font-family:monospace;color:#e2e8f0">${main:,.2f}</td>'
-            f'<td style="text-align:right;font-family:monospace;color:#60a5fa">${mm:,.2f}</td>'
-            f'<td style="text-align:right;font-family:monospace;font-weight:600;color:#f1f5f9">${wk:,.2f}</td>'
-            f'<td style="text-align:right;font-family:monospace;color:#64748b">${running:,.2f}</td>'
+            f'<td class="priv" style="text-align:right;font-family:monospace;color:#e2e8f0">${main:,.2f}</td>'
+            f'<td class="priv" style="text-align:right;font-family:monospace;color:#60a5fa">${mm:,.2f}</td>'
+            f'<td class="priv" style="text-align:right;font-family:monospace;font-weight:600;color:#f1f5f9">${wk:,.2f}</td>'
+            f'<td class="priv" style="text-align:right;font-family:monospace;color:#64748b">${running:,.2f}</td>'
             f'<td style="text-align:right;font-family:monospace;color:{"#10b981" if yld and yld>=15 else "#f59e0b" if yld else "#475569"}">{yld_str}</td>'
-            f'<td style="text-align:right;color:#64748b">{port_str}</td>'
+            f'<td class="priv" style="text-align:right;color:#64748b">{port_str}</td>'
             f'</tr>'
         )
 
@@ -1822,11 +2176,11 @@ def build_html(data):
         f'<div class="stats-grid">'
         f'<div class="stat-card"><div class="sc-lbl">Cumulative Earned</div><div class="sc-val">${cumulative:,.2f}</div></div>'
         f'<div class="stat-card"><div class="sc-lbl">Avg / Week</div><div class="sc-val">${avg_weekly:,.2f}</div></div>'
-        f'<div class="stat-card"><div class="sc-lbl">Avg Annual Yield</div><div class="sc-val">{avg_yield:.1f}%</div></div>'
+        f'<div class="stat-card"><div class="sc-lbl">Avg Annual Yield</div><div class="sc-val no-priv">{avg_yield:.1f}%</div></div>'
         f'<div class="stat-card"><div class="sc-lbl">Best Week</div><div class="sc-val">${best_week_earn:,.2f}<div class="sc-lbl" style="margin-top:2px">{best_week[0]}</div></div></div>'
         f'</div>'
         f'<div class="charts-row">'
-        f'<div class="chart-card"><h3>Weekly Earnings — Main vs MM</h3><canvas id="earn-bar"></canvas></div>'
+        f'<div class="chart-card priv-chart"><h3>Weekly Earnings — Main vs MM</h3><canvas id="earn-bar"></canvas></div>'
         f'<div class="chart-card"><h3>Annualized Yield %</h3><canvas id="yield-line"></canvas></div>'
         f'</div>'
         f'<div class="ts-card">'
@@ -1933,174 +2287,274 @@ def build_html(data):
 
     # ── Static CSS
     CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700;800&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0d0f18;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+:root{
+  --bg:#0d111b;--surface:#18222b;--surface2:#1e2933;--surface3:#24303e;
+  --border:#ffffff0d;--border2:#ffffff18;
+  --text:#e8eaf0;--text2:#8892a4;--text3:#4e5a6e;
+  --accent:#4da2ff;--accent2:#6fbcf0;--accent-glow:#4da2ff33;
+  --green:#10b981;--red:#f87171;--orange:#f97316;--yellow:#f59e0b;
+  --blue:#3b82f6;--purple:#8b5cf6;
+  --font-display:'Space Grotesk',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+}
+body{background:radial-gradient(ellipse 1000px 700px at 50% -10%,#9945ff33,transparent 70%),radial-gradient(ellipse 1000px 900px at 0% 100%,#5eead466,transparent 75%),radial-gradient(ellipse 1000px 900px at 100% 100%,#5eead466,transparent 75%),var(--bg);background-attachment:fixed;color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;line-height:1.5;-webkit-font-smoothing:antialiased}
 
-/* Nav */
-.top-nav{display:flex;align-items:center;justify-content:space-between;padding:14px 24px;background:#13162a;border-bottom:1px solid #ffffff0a;position:sticky;top:0;z-index:100;gap:16px;flex-wrap:wrap}
-.nav-brand{font-size:.95rem;font-weight:700;color:#f1f5f9;white-space:nowrap;letter-spacing:.01em}
-.tab-group{display:flex;gap:3px;background:#0d0f18;border-radius:8px;padding:3px}
-.tab-btn{padding:7px 18px;border-radius:6px;border:none;background:transparent;color:#64748b;font-size:.82rem;font-weight:600;cursor:pointer;transition:all .15s;letter-spacing:.01em}
-.tab-btn.active{background:#1e2235;color:#f1f5f9}
-.tab-btn:hover:not(.active){color:#94a3b8}
-.nav-right{display:flex;align-items:center;gap:14px}
-.nav-total-wrap{display:flex;flex-direction:column;align-items:flex-end}
-.nav-total-lbl{font-size:.6rem;color:#475569;text-transform:uppercase;letter-spacing:.08em;margin-bottom:1px}
-.nav-total{font-size:1.2rem;font-weight:800;color:#f1f5f9;font-family:monospace}
-.nav-ts{font-size:.65rem;color:#475569}
-.nav-refresh-btn{padding:7px 14px;border-radius:7px;border:1px solid #ffffff14;background:transparent;color:#94a3b8;font-size:.78rem;font-weight:600;cursor:pointer;transition:all .15s;white-space:nowrap}
-.nav-refresh-btn:hover:not(:disabled){background:#1e2235;color:#f1f5f9;border-color:#ffffff22}
-.nav-refresh-btn:disabled{opacity:.45;cursor:not-allowed}
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#ffffff14;border-radius:99px}
 
-/* Pages */
-.page{display:none;padding:24px;max-width:1200px;margin:0 auto}
+/* ── Nav ── */
+.top-nav{display:flex;align-items:flex-start;justify-content:space-between;padding:24px 28px 8px;gap:16px;flex-wrap:wrap;max-width:1440px;margin:0 auto}
+.nav-left{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.nav-brand{font-size:1.8rem;font-weight:800;color:var(--text);white-space:nowrap;letter-spacing:.04em;text-transform:uppercase;display:flex;align-items:center;gap:8px;font-family:var(--font-display);cursor:pointer;transition:opacity .15s}
+.nav-brand:hover{opacity:.82}
+.page-menu{display:flex;gap:4px;flex-wrap:wrap}
+.page-menu-item{padding:5px 12px;border-radius:8px;font-size:.8rem;font-weight:500;color:var(--text2);cursor:pointer;transition:background .12s,color .12s;white-space:nowrap}
+.page-menu-item:hover{background:var(--surface2);color:var(--text)}
+.page-menu-item.active{background:var(--surface2);color:var(--accent);font-weight:600}
+.nav-right{display:flex;align-items:center;gap:16px}
+.nav-ts{font-size:.72rem;color:var(--text2)}
+.nav-refresh-btn{padding:7px 12px;border-radius:8px;border:1px solid var(--border2);background:transparent;color:var(--text2);font-size:1rem;line-height:1;cursor:pointer;transition:all .18s;font-family:inherit;display:inline-flex}
+.nav-refresh-btn:hover:not(:disabled){background:var(--surface3);color:var(--text);border-color:var(--border2)}
+.nav-refresh-btn:disabled{opacity:.7;cursor:not-allowed}
+.nav-refresh-btn.spinning{color:var(--accent)}
+.nav-refresh-btn.spinning span{display:inline-block;animation:nav-spin 0.9s linear infinite}
+.nav-refresh-btn.refresh-error{color:var(--red);border-color:var(--red)}
+.nav-refresh-btn#privacy-btn.active{color:var(--accent);border-color:var(--accent)}
+@keyframes nav-spin{to{transform:rotate(360deg)}}
+
+/* ── Privacy mode ── */
+body.priv-on .sc-val,
+body.priv-on .pc-val,
+body.priv-on .pc-total,
+body.priv-on .cat-val,
+body.priv-on .ra-val,
+body.priv-on .mt-num,
+body.priv-on .mt-usd,
+body.priv-on .ts-num,
+body.priv-on .ts-price,
+body.priv-on .ts-usd,
+body.priv-on .ts-total-val,
+body.priv-on .pc-sym,
+body.priv-on .pc-title,
+body.priv-on .ts-sym,
+body.priv-on .mt-sym,
+body.priv-on .md-title,
+body.priv-on .md-footer,
+body.priv-on .md-range-info,
+body.priv-on .badge,
+body.priv-on .priv{filter:blur(6px);user-select:none;transition:filter .2s}
+body.priv-on .sc-val.no-priv{filter:none;user-select:auto}
+body.priv-on .priv-chart{filter:blur(8px);transition:filter .2s}
+body.priv-on .stock-card{pointer-events:none;cursor:default!important}
+body.priv-on .stock-card .pc-edit-hint{opacity:.2}
+body.priv-on .add-stock-btn{pointer-events:none;opacity:.35;cursor:not-allowed}
+
+/* ── Pages ── */
+.page{display:none;padding:28px 28px 48px;max-width:1440px;margin:0 auto}
 .page.active{display:block}
 
-/* Stats */
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px}
-.stat-card{background:#1a1d2e;border-radius:12px;padding:18px 20px;border-left:3px solid #ffffff08}
-.sc-lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em}
-.sc-val{font-size:1.25rem;font-weight:700;color:#f1f5f9;margin-top:5px;font-family:monospace}
-.sc-val.debt{color:#f87171}
+/* ── Stats ── */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:28px}
+.stat-card{background:var(--surface);border-radius:14px;padding:20px 22px;border:1px solid var(--border);position:relative;overflow:hidden;transition:border-color .18s}
+.stat-card::after{content:'';position:absolute;inset:0;border-radius:14px;background:linear-gradient(135deg,#ffffff04 0%,transparent 60%);pointer-events:none}
+.stat-card:hover{border-color:var(--border2)}
+.sc-lbl{font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-weight:500}
+.sc-val{font-size:1.3rem;font-weight:800;color:var(--text);margin-top:7px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;font-family:var(--font-display)}
+.sc-val.debt{color:var(--red)}
 
-/* Charts */
-.charts-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
-.chart-card{background:#1a1d2e;border-radius:12px;padding:20px}
-.chart-card h3{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px}
-@media(max-width:640px){.charts-row{grid-template-columns:1fr}}
+/* ── Chart card ── */
+.chart-card{background:var(--surface);border-radius:16px;padding:22px 24px;margin-bottom:24px;border:1px solid var(--border)}
+.chart-tabs{display:flex;gap:6px;margin-bottom:20px}
+.chart-tab{padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text3);font-size:.73rem;font-weight:600;cursor:pointer;transition:all .18s;font-family:inherit;letter-spacing:.01em}
+.chart-tab:hover:not(.active){border-color:var(--border2);color:var(--text2)}
+.chart-tab.active{background:var(--accent-glow);border-color:var(--accent);color:var(--accent2)}
+.chart-pane{display:none}.chart-pane.active{display:block}
 
-/* Allocation bars */
-.alloc-card{background:#1a1d2e;border-radius:12px;padding:20px;margin-bottom:24px}
-.alloc-card h3{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:16px}
-.cat-row{margin-bottom:14px}
-.cat-info{display:flex;justify-content:space-between;margin-bottom:5px}
-.cat-lbl{font-size:.82rem;color:#94a3b8}
-.cat-val{font-size:.82rem;font-weight:600;color:#f1f5f9;font-family:monospace}
-.cat-bar{height:6px;border-radius:3px;background:#ffffff08;overflow:hidden}
-.cat-fill{height:100%;border-radius:3px;transition:width .4s}
-
-/* Token summary */
-.ts-card{background:#1a1d2e;border-radius:12px;padding:20px;margin-bottom:24px}
-.ts-sections{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px}
+/* ── Token summary ── */
+.ts-card{background:var(--surface);border-radius:16px;padding:22px 24px;margin-bottom:24px;border:1px solid var(--border)}
+.ts-sections{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:32px}
 @media(max-width:700px){.ts-sections{grid-template-columns:1fr}}
-.ts-head{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #ffffff08}
-.ts-head.debt{color:#f87171;border-bottom-color:#f8717118}
+.ts-head{font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border);font-weight:600}
+.ts-head.debt{color:var(--red);border-bottom-color:#f8717120}
 .ts-table{width:100%;border-collapse:collapse;font-size:.8rem}
-.ts-table th{font-size:.62rem;color:#475569;text-transform:uppercase;padding-bottom:6px;border-bottom:1px solid #ffffff0a;text-align:left}
+.ts-table th{font-size:.6rem;color:var(--text3);text-transform:uppercase;padding-bottom:7px;border-bottom:1px solid var(--border);text-align:left;font-weight:500;letter-spacing:.05em}
 .ts-table th:not(:first-child){text-align:right}
-.ts-table td{padding:5px 0;border-bottom:1px solid #ffffff04}
-.ts-sym{color:#94a3b8;width:22%}
-.ts-price{text-align:right;font-family:monospace;color:#64748b;width:22%}
-.ts-num{text-align:right;font-family:monospace;color:#e2e8f0;width:30%}
-.ts-usd{text-align:right;color:#64748b;width:26%}
-.ts-total-lbl{color:#64748b;font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;padding-top:9px;border-top:1px solid #ffffff0f}
-.ts-total-val{text-align:right;font-weight:700;color:#f1f5f9;font-family:monospace;font-size:.9rem;padding-top:9px;border-top:1px solid #ffffff0f}
-.ts-total-val.debt{color:#f87171}
+.ts-table td{padding:6px 0;border-bottom:1px solid var(--border)}
+.ts-table tr:last-of-type td{border-bottom:none}
+.ts-sym{color:var(--text2);width:22%;font-weight:500}
+.ts-price{text-align:right;font-family:'SF Mono',ui-monospace,monospace;color:var(--text3);width:22%;font-size:.77rem}
+.ts-num{text-align:right;font-family:'SF Mono',ui-monospace,monospace;color:var(--text);width:30%;font-size:.77rem}
+.ts-usd{text-align:right;color:var(--text3);width:26%;font-size:.77rem}
+.ts-total-lbl{color:var(--text3);font-size:.65rem;text-transform:uppercase;letter-spacing:.05em;padding-top:10px;border-top:1px solid var(--border2);font-weight:500}
+.ts-total-val{text-align:right;font-weight:700;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;font-size:.9rem;padding-top:10px;border-top:1px solid var(--border2)}
+.ts-total-val.debt{color:var(--red)}
 
-/* Risk cards */
-.risk-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
+/* ── Risk cards ── */
+.risk-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:24px}
 @media(max-width:640px){.risk-row{grid-template-columns:1fr}}
-.risk-card{background:#1a1d2e;border-radius:12px;padding:20px}
-.rh{font-size:.82rem;font-weight:600;color:#f1f5f9;margin-bottom:12px;display:flex;align-items:center;gap:8px}
-.risk-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.rs-lbl{font-size:.65rem;color:#475569;text-transform:uppercase;margin-bottom:2px}
-.rs-val{font-size:.82rem;font-weight:600;color:#cbd5e1;font-family:monospace}
+.risk-card{background:var(--surface);border-radius:16px;padding:22px 24px;border:1px solid var(--border)}
+.rh{font-size:.8rem;font-weight:700;color:var(--text);margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.risk-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.rs-lbl{font-size:.62rem;color:var(--text3);text-transform:uppercase;margin-bottom:3px;font-weight:500;letter-spacing:.05em}
+.rs-val{font-size:.83rem;font-weight:600;color:var(--text2);font-family:'SF Mono',ui-monospace,monospace}
 
-/* Section label */
-.section-label{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;margin:28px 0 12px;padding-left:10px;border-left:2px solid #ffffff18}
+/* ── Section label ── */
+.section-label{font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.1em;margin:32px 0 14px;font-weight:600;display:flex;align-items:center;gap:10px}
+.section-label::after{content:'';flex:1;height:1px;background:var(--border)}
 
-/* Position cards */
-.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:16px;margin-bottom:8px}
-.pos-card{background:#1a1d2e;border-radius:12px;padding:18px;cursor:pointer;transition:transform .15s,box-shadow .15s,background .15s;user-select:none;display:flex;flex-direction:column}
-.pos-card:hover{transform:translateY(-2px);box-shadow:0 8px 28px #00000055;background:#1e2235}
-.pc-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.pc-badges{display:flex;gap:6px;flex-wrap:wrap}
-.pc-arrow{color:#334155;font-size:1rem;font-weight:700;transition:color .15s}
-.pos-card:hover .pc-arrow{color:#64748b}
-.badge{font-size:.67rem;padding:2px 8px;border-radius:999px;font-weight:600;letter-spacing:.01em}
-.pc-title{font-size:.92rem;font-weight:700;color:#f1f5f9;margin-bottom:6px}
-.pc-status{font-size:.68rem;font-weight:700;margin-bottom:6px}
-.pc-tokens{margin-bottom:10px}
-.pc-row{display:flex;justify-content:space-between;padding:3px 0;font-size:.78rem}
-.pc-sym{color:#94a3b8}
-.pc-val{font-family:monospace;color:#e2e8f0}
-.pc-card-footer{display:flex;align-items:center;justify-content:space-between;padding-top:10px;border-top:1px solid #ffffff0f;margin-top:auto}
-.pc-total{font-size:1.05rem;font-weight:700;color:#f1f5f9;font-family:monospace}
-.pc-live{font-size:.62rem;font-weight:700;letter-spacing:.04em;color:#4ade8088}
-.ltv-wrap{padding:10px 0 26px}
-.ltv-cur-row{display:flex;align-items:baseline;gap:2px;margin-bottom:7px}
-.ltv-cur-val{font-size:.82rem;font-weight:700;font-family:monospace}
-.ltv-cur-lbl{font-size:.67rem;color:#64748b}
-.ltv-track{position:relative;height:6px;background:#ffffff14;border-radius:3px}
+/* ── Position cards ── */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;margin-bottom:8px}
+.pos-card{background:var(--surface);border-radius:14px;padding:18px 20px;cursor:pointer;transition:transform .18s,box-shadow .18s,border-color .18s,background .18s;user-select:none;display:flex;flex-direction:column;border:1px solid var(--border);position:relative;overflow:hidden}
+.pos-card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,#ffffff03 0%,transparent 50%);pointer-events:none;border-radius:14px}
+.pos-card:hover{transform:translateY(-3px);box-shadow:0 12px 40px #00000060,0 0 0 1px var(--border2);background:var(--surface2);border-color:var(--border2)}
+.pc-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.pc-badges{display:flex;gap:5px;flex-wrap:wrap}
+.pc-arrow{color:var(--border2);font-size:1.1rem;font-weight:700;transition:all .18s;opacity:.6}
+.pos-card:hover .pc-arrow{color:var(--text2);opacity:1;transform:translateX(2px)}
+.badge{font-size:.64rem;padding:3px 9px;border-radius:999px;font-weight:600;letter-spacing:.02em}
+.pc-title{font-size:.9rem;font-weight:700;color:var(--text);margin-bottom:6px;letter-spacing:-.01em}
+.pc-status{font-size:.67rem;font-weight:700;margin-bottom:7px;letter-spacing:.02em}
+.pc-tokens{margin-bottom:12px}
+.pc-row{display:flex;justify-content:space-between;padding:3px 0;font-size:.77rem}
+.pc-sym{color:var(--text2)}
+.pc-val{font-family:'SF Mono',ui-monospace,monospace;color:var(--text);font-size:.77rem}
+.pc-card-footer{display:flex;align-items:center;justify-content:space-between;padding-top:12px;border-top:1px solid var(--border);margin-top:auto}
+.pc-total{font-size:1rem;font-weight:800;color:var(--text);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.pc-live{font-size:.6rem;font-weight:700;letter-spacing:.06em;color:#10b98160;text-transform:uppercase}
+.ltv-wrap{padding:10px 0 28px}
+.ltv-cur-row{display:flex;align-items:baseline;gap:2px;margin-bottom:8px}
+.ltv-cur-val{font-size:.82rem;font-weight:700;font-family:'SF Mono',ui-monospace,monospace}
+.ltv-cur-lbl{font-size:.65rem;color:var(--text3)}
+.ltv-track{position:relative;height:6px;background:#ffffff0e;border-radius:3px}
 .ltv-fill{position:absolute;left:0;top:0;height:100%;border-radius:3px;transition:width .3s}
-.ltv-tick{position:absolute;top:-4px;width:2px;height:14px;background:#64748b;border-radius:1px}
-.ltv-tick::after{content:attr(data-lbl);position:absolute;top:17px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:.62rem;color:#64748b;letter-spacing:.02em}
-.ltv-tick-liq{background:#ef4444}
-.ltv-tick-liq::after{color:#ef4444}
-.md-ltv{padding:4px 20px 8px}
+.ltv-tick{position:absolute;top:-4px;width:2px;height:14px;background:var(--text3);border-radius:1px}
+.ltv-tick::after{content:attr(data-lbl);position:absolute;top:17px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:.6rem;color:var(--text3);letter-spacing:.02em}
+.ltv-tick-liq{background:var(--red)}
+.ltv-tick-liq::after{color:var(--red)}
+.md-ltv{padding:4px 22px 8px}
 .ra-row{display:flex;gap:16px;margin:8px 0 2px;flex-wrap:wrap}
 .ra-item{display:flex;flex-direction:column;gap:2px}
-.ra-lbl{font-size:.62rem;color:#64748b;text-transform:uppercase;letter-spacing:.04em}
-.ra-val{font-size:.82rem;font-weight:600;color:#f1f5f9;font-family:monospace}
+.ra-lbl{font-size:.6rem;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;font-weight:500}
+.ra-val{font-size:.82rem;font-weight:600;color:var(--text);font-family:'SF Mono',ui-monospace,monospace}
 
-/* Modal */
-.modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.78);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s;z-index:999;padding:16px;backdrop-filter:blur(4px)}
+/* ── Modal ── */
+.modal-ov{position:fixed;inset:0;background:rgba(2,4,12,.82);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .22s;z-index:999;padding:16px;backdrop-filter:blur(8px)}
 .modal-ov.open{opacity:1;pointer-events:all}
-.modal-box{background:#1a1d2e;border-radius:14px;width:100%;max-width:560px;max-height:92vh;overflow-y:auto;transform:scale(.97);transition:transform .2s;border:1px solid #ffffff08}
-.modal-ov.open .modal-box{transform:scale(1)}
-.md-header{display:flex;align-items:flex-start;justify-content:space-between;padding:20px 20px 14px}
-.md-title{font-size:1rem;font-weight:700;color:#f1f5f9;margin-bottom:6px}
+.modal-box{background:var(--surface);border-radius:18px;width:100%;max-width:560px;max-height:92vh;overflow-y:auto;transform:translateY(10px) scale(.98);transition:transform .22s;border:1px solid var(--border2);box-shadow:0 24px 80px #00000099}
+.modal-ov.open .modal-box{transform:translateY(0) scale(1)}
+.md-header{display:flex;align-items:flex-start;justify-content:space-between;padding:22px 22px 14px}
+.md-title{font-size:1rem;font-weight:700;color:var(--text);margin-bottom:7px;letter-spacing:-.01em}
 .md-badges{display:flex;gap:6px}
-.md-close,.modal-close{background:none;border:none;color:#475569;font-size:1rem;cursor:pointer;padding:4px;line-height:1;transition:color .15s;flex-shrink:0}
-.md-close:hover,.modal-close:hover{color:#f1f5f9}
-.modal-header{display:flex;align-items:center;justify-content:space-between;padding:20px 20px 14px;border-bottom:1px solid #ffffff0a}
-.md-range{padding:0 20px 12px;border-bottom:1px solid #ffffff0a;margin-bottom:4px}
-.md-status{font-size:.72rem;font-weight:700;margin-bottom:3px}
-.md-range-info{font-size:.7rem;color:#64748b;font-family:monospace}
-.mt-table{width:calc(100% - 40px);margin:8px 20px 0;border-collapse:collapse;font-size:.82rem}
-.mt-table th{text-align:left;font-size:.63rem;color:#475569;text-transform:uppercase;padding-bottom:6px;border-bottom:1px solid #ffffff0a}
+.md-close,.modal-close{background:none;border:none;color:var(--text3);font-size:1rem;cursor:pointer;padding:4px;line-height:1;transition:color .15s;flex-shrink:0;border-radius:6px}
+.md-close:hover,.modal-close:hover{color:var(--text);background:var(--border)}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:22px 22px 14px;border-bottom:1px solid var(--border)}
+.md-range{padding:0 22px 14px;border-bottom:1px solid var(--border);margin-bottom:4px}
+.md-status{font-size:.7rem;font-weight:700;margin-bottom:4px;letter-spacing:.03em}
+.md-range-info{font-size:.69rem;color:var(--text3);font-family:'SF Mono',ui-monospace,monospace}
+.mt-table{width:calc(100% - 44px);margin:10px 22px 0;border-collapse:collapse;font-size:.81rem}
+.mt-table th{text-align:left;font-size:.6rem;color:var(--text3);text-transform:uppercase;padding-bottom:7px;border-bottom:1px solid var(--border);font-weight:500;letter-spacing:.05em}
 .mt-table th:not(:first-child){text-align:right}
-.mt-table td{padding:6px 0;border-bottom:1px solid #ffffff04}
-.mt-sym{color:#94a3b8;width:42%}
-.mt-num{text-align:right;font-family:monospace;width:30%}
-.mt-usd{text-align:right;color:#64748b;width:28%}
-.mt-note{font-size:.62rem;color:#475569;font-style:italic;margin-left:4px}
-.mt-section{font-size:.62rem;color:#475569;text-transform:uppercase;letter-spacing:.05em;padding:10px 0 2px}
-.md-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:14px 20px 0;padding:12px;background:#ffffff06;border-radius:10px}
-.ls-item{display:flex;flex-direction:column;gap:3px}
-.ls-item span:first-child{font-size:.63rem;color:#475569;text-transform:uppercase;letter-spacing:.04em}
-.ls-item span:last-child{font-size:.82rem;font-weight:600;font-family:monospace}
-.md-footer{text-align:right;font-size:1.1rem;font-weight:700;color:#f1f5f9;font-family:monospace;padding:14px 20px 20px;border-top:1px solid #ffffff0f;margin-top:12px}
+.mt-table td{padding:7px 0;border-bottom:1px solid var(--border)}
+.mt-table tr:last-of-type td{border-bottom:none}
+.mt-sym{color:var(--text2);width:42%;font-weight:500}
+.mt-num{text-align:right;font-family:'SF Mono',ui-monospace,monospace;width:30%}
+.mt-usd{text-align:right;color:var(--text3);width:28%;font-family:'SF Mono',ui-monospace,monospace;font-size:.76rem}
+.mt-note{font-size:.6rem;color:var(--text3);font-style:italic;margin-left:4px}
+.mt-section{font-size:.6rem;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;padding:12px 0 3px;font-weight:600}
+.md-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 22px 0;padding:14px;background:var(--surface3);border-radius:12px;border:1px solid var(--border)}
+.ls-item{display:flex;flex-direction:column;gap:4px}
+.ls-item span:first-child{font-size:.6rem;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;font-weight:500}
+.ls-item span:last-child{font-size:.82rem;font-weight:600;font-family:'SF Mono',ui-monospace,monospace}
+.md-footer{text-align:right;font-size:1.1rem;font-weight:800;color:var(--text);font-family:var(--font-display);padding:16px 22px 22px;border-top:1px solid var(--border);margin-top:14px;letter-spacing:-.02em}
 
-/* Tooltip */
+/* ── Tooltip ── */
 .tip-wrap{position:relative;display:inline-block;cursor:help}
-.tip-icon{font-size:.68rem;color:#475569;margin-left:3px;vertical-align:middle;border:1px solid #475569;border-radius:50%;padding:0 3px;line-height:1.3}
-.tip-box{display:none;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#1e2235;border:1px solid #ffffff1a;border-radius:8px;padding:10px 13px;width:230px;font-size:.72rem;color:#94a3b8;line-height:1.55;z-index:99;white-space:normal;text-align:left;box-shadow:0 8px 24px #00000055}
-.tip-box strong{color:#f1f5f9;display:block;margin-bottom:5px;font-size:.75rem}
-.tip-box code{color:#60a5fa;font-family:monospace;font-size:.72rem}
+.tip-icon{font-size:.65rem;color:var(--text3);margin-left:3px;vertical-align:middle;border:1px solid var(--text3);border-radius:50%;padding:0 3px;line-height:1.3;opacity:.7}
+.tip-box{display:none;position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--surface3);border:1px solid var(--border2);border-radius:10px;padding:11px 14px;width:240px;font-size:.71rem;color:var(--text2);line-height:1.6;z-index:99;white-space:normal;text-align:left;box-shadow:0 10px 30px #00000066}
+.tip-box strong{color:var(--text);display:block;margin-bottom:5px;font-size:.74rem}
+.tip-box code{color:#60a5fa;font-family:'SF Mono',ui-monospace,monospace;font-size:.71rem}
 .tip-wrap:hover .tip-box{display:block}
 
-/* Stock modals */
-.add-stock-btn{padding:5px 13px;border-radius:6px;border:1px solid #6366f144;background:#6366f111;color:#818cf8;font-size:.72rem;font-weight:600;cursor:pointer;transition:all .15s}
-.add-stock-btn:hover{background:#6366f122;border-color:#818cf8}
-.se-field{display:flex;flex-direction:column;gap:5px;margin-bottom:14px;padding:0 20px}
-.se-lbl{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em}
-.se-input{background:#0d0f18;border:1px solid #ffffff14;border-radius:8px;color:#f1f5f9;font-size:.95rem;padding:9px 12px;width:100%;outline:none;font-family:monospace;appearance:none;transition:border-color .15s}
-.se-input:focus{border-color:#6366f166}
-.se-hint{font-size:.63rem;color:#475569;margin-top:4px}
-.se-save{margin:6px 20px 20px;width:calc(100% - 40px);padding:10px;border-radius:8px;border:none;background:#6366f1;color:#fff;font-size:.85rem;font-weight:700;cursor:pointer;transition:opacity .15s;display:block}
-.se-save:hover:not(:disabled){opacity:.85}
-.se-save:disabled{opacity:.45;cursor:not-allowed}
+/* ── Stock modals ── */
+.add-stock-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent-glow);color:var(--accent2);font-size:.71rem;font-weight:600;cursor:pointer;transition:all .18s;font-family:inherit}
+.add-stock-btn:hover{background:#6366f133;box-shadow:0 0 16px var(--accent-glow)}
+.se-field{display:flex;flex-direction:column;gap:5px;margin-bottom:14px;padding:0 22px}
+.se-lbl{font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-weight:500}
+.se-input{background:var(--bg);border:1px solid var(--border2);border-radius:10px;color:var(--text);font-size:.93rem;padding:10px 13px;width:100%;outline:none;font-family:'SF Mono',ui-monospace,monospace;appearance:none;transition:border-color .18s,box-shadow .18s}
+.se-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+.se-hint{font-size:.62rem;color:var(--text3);margin-top:4px}
+.se-save{margin:6px 22px 22px;width:calc(100% - 44px);padding:11px;border-radius:10px;border:none;background:linear-gradient(135deg,#4da2ff,#6fbcf0);color:#fff;font-size:.85rem;font-weight:700;cursor:pointer;transition:all .18s;display:block;letter-spacing:.01em;font-family:inherit;box-shadow:0 4px 16px #4da2ff40}
+.se-save:hover:not(:disabled){opacity:.9;box-shadow:0 6px 24px #4da2ff55;transform:translateY(-1px)}
+.se-save:disabled{opacity:.4;cursor:not-allowed;box-shadow:none;transform:none}
+
+/* ── Allocation bars (unused but keep for compat) ── */
+.alloc-card{background:var(--surface);border-radius:16px;padding:22px 24px;margin-bottom:24px;border:1px solid var(--border)}
+.alloc-card h3{font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:16px;font-weight:600}
+.cat-row{margin-bottom:14px}.cat-info{display:flex;justify-content:space-between;margin-bottom:5px}
+.cat-lbl{font-size:.82rem;color:var(--text2)}.cat-val{font-size:.82rem;font-weight:600;color:var(--text);font-family:monospace}
+.cat-bar{height:5px;border-radius:3px;background:#ffffff0a;overflow:hidden}.cat-fill{height:100%;border-radius:3px;transition:width .4s}
 """
 
     # ── Static JS
     JS = """
 function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(t => t.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
-  document.querySelector('.tab-btn[data-page="' + name + '"]').classList.add('active');
 }
+function selectPage(name, label, el) {
+  document.querySelectorAll('.page-menu-item').forEach(i => i.classList.remove('active'));
+  el.classList.add('active');
+  showPage(name);
+}
+function goToMarket() {
+  selectPage('market', 'Market', document.getElementById('page-menu-market'));
+}
+
+const EYE_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0112 19c-7 0-11-7-11-7a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 7 11 7a18.5 18.5 0 01-2.16 3.19"/><path d="M14.12 14.12a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+function updatePrivacyBtn(on) {
+  const btn = document.getElementById('privacy-btn');
+  if (!btn) return;
+  btn.classList.toggle('active', on);
+  btn.querySelector('span').innerHTML = on ? EYE_OFF_ICON : EYE_ICON;
+  btn.title = on ? 'Show numbers' : 'Hide numbers';
+}
+function togglePrivacy() {
+  if (document.body.classList.contains('priv-on')) {
+    openLoginModal();
+  } else {
+    document.body.classList.add('priv-on');
+    updatePrivacyBtn(true);
+  }
+}
+function openLoginModal() {
+  document.getElementById('login-error').style.display = 'none';
+  document.getElementById('login-user').value = '';
+  document.getElementById('login-pass').value = '';
+  document.getElementById('login-ov').classList.add('open');
+  setTimeout(() => document.getElementById('login-user').focus(), 50);
+}
+function closeLoginModal() {
+  document.getElementById('login-ov').classList.remove('open');
+}
+function submitLogin() {
+  const u = document.getElementById('login-user').value.trim();
+  const p = document.getElementById('login-pass').value;
+  if (u === 'admin' && p === '__DASH_PASS__') {
+    document.body.classList.remove('priv-on');
+    updatePrivacyBtn(false);
+    closeLoginModal();
+  } else {
+    document.getElementById('login-error').style.display = 'block';
+  }
+}
+(function initPrivacy() {
+  document.body.classList.add('priv-on');
+  updatePrivacyBtn(true);
+})();
 function openModal(id) {
   const src = document.getElementById('modal-' + id);
   if (!src) return;
@@ -2117,6 +2571,7 @@ document.addEventListener('keydown', e => {
 });
 
 function openStockEdit(ticker, shares, avgCost, currency, name) {
+  if (document.body.classList.contains('priv-on')) return;
   document.getElementById('se-title').textContent = ticker + ' · ' + name;
   document.getElementById('se-ticker').value  = ticker;
   document.getElementById('se-shares').value  = shares;
@@ -2142,12 +2597,13 @@ async function saveStock() {
   try {
     const r = await fetch('/stocks/update', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const j = await r.json();
-    if (j.ok) { closeStockEdit(); doRefresh(); }
+    if (j.ok) { closeStockEdit(); btn.textContent = 'Refreshing…'; await doRefresh(); }
     else { btn.textContent = j.error || 'Error'; btn.disabled = false; }
   } catch(e) { btn.textContent = 'No server'; btn.disabled = false; }
 }
 
 function openAddStock() {
+  if (document.body.classList.contains('priv-on')) return;
   document.getElementById('as-ticker').value  = '';
   document.getElementById('as-shares').value  = '';
   document.getElementById('as-avgcost').value = '';
@@ -2173,52 +2629,231 @@ async function addStock() {
   try {
     const r = await fetch('/stocks/add', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticker,shares,avg_cost})});
     const j = await r.json();
-    if (j.ok) { closeAddStock(); doRefresh(); }
+    if (j.ok) { closeAddStock(); await doRefresh(); }
     else { btn.textContent = j.error || 'Error'; btn.disabled = false; }
   } catch(e) { btn.textContent = 'No server'; btn.disabled = false; }
 }
 
-function doRefresh() {
-  window.location.reload();
-}
-async function triggerRefresh() {
-  const btn = document.getElementById('refresh-btn');
-  btn.disabled = true; btn.textContent = '⟳ Refreshing…';
+async function doRefresh() {
   try {
     const r = await fetch('/refresh', {method:'POST'});
     const j = await r.json();
     if (j.ok) { window.location.reload(); }
-    else {
-      btn.textContent = '✕ ' + (j.error || 'Error').slice(0, 30);
-      setTimeout(() => { btn.textContent = '⟳ Refresh'; btn.disabled = false; }, 4000);
-    }
+  } catch(e) { window.location.reload(); }
+}
+async function triggerRefresh() {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true; btn.classList.add('spinning');
+  try {
+    await fetch('/refresh', {method:'POST'});
+    pollRefreshStatus(btn);
   } catch(e) {
-    btn.textContent = '✕ No server';
-    setTimeout(() => { btn.textContent = '⟳ Refresh'; btn.disabled = false; }, 4000);
+    refreshFailed(btn);
   }
+}
+async function pollRefreshStatus(btn) {
+  for (let i = 0; i < 60; i++) {
+    await new Promise(res => setTimeout(res, 3000));
+    try {
+      const r = await fetch('/refresh-status');
+      const j = await r.json();
+      if (j.done) {
+        if (j.ok) { window.location.reload(); } else { refreshFailed(btn); }
+        return;
+      }
+    } catch(e) { /* transient — keep polling */ }
+  }
+  refreshFailed(btn);
+}
+function refreshFailed(btn) {
+  btn.classList.remove('spinning');
+  btn.classList.add('refresh-error');
+  setTimeout(() => { btn.classList.remove('refresh-error'); btn.disabled = false; }, 4000);
+}
+
+// ── Market Brief ──────────────────────────────────────────────────────────────
+let _mbNotes = [];
+const _mbGridCache = {};
+
+(function mbInit() {
+  if (document.getElementById('mb-history-list')) mbLoad();
+})();
+
+function mbTodayStr() {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+async function mbLoad() {
+  try {
+    const r = await fetch('/market/notes');
+    _mbNotes = await r.json();
+    const picker = document.getElementById('mb-date-picker');
+    let date = mbTodayStr();
+    if (picker) {
+      if (_mbNotes.length) {
+        const dates = _mbNotes.map(n => n.date).sort();
+        picker.min = dates[0];
+        picker.max = dates[dates.length - 1];
+      }
+      if (!picker.value) picker.value = date;
+      date = picker.value;
+    }
+    mbRenderDate(date);
+  } catch(e) { console.warn('Market notes load failed', e); }
+}
+
+function mbSelectDate(date) {
+  mbRenderDate(date);
+}
+
+function mbRenderDate(date) {
+  const list = document.getElementById('mb-history-list');
+  if (!list) return;
+  const n = _mbNotes.find(x => x.date === date);
+  if (!n) {
+    list.innerHTML = `<div class="mb-empty">No brief for ${date}.</div>`;
+    return;
+  }
+  list.innerHTML = `
+    <div class="mb-note">
+      <div class="mb-note-header">
+        <div>
+          <div class="mb-note-date">${n.date}</div>
+          ${n.title ? `<div class="mb-note-title">${n.title}</div>` : ''}
+        </div>
+        <button class="mb-note-del" onclick="mbDelete('${n.date}')" title="Delete">✕</button>
+      </div>
+      ${n.content ? mbFormatBody(n.content, n.date) : ''}
+    </div>
+  `;
+}
+
+// Splits a brief into intro / categorized items ([Macro], [Crypto], ...) / summary.
+function mbParse(content) {
+  const lines = (content || '').split('\\n');
+  const items = [];
+  const summary = [];
+  let mode = 'intro';
+  let buffer = [];
+  let currentCategory = null;
+
+  function flushItem() {
+    if (currentCategory && buffer.length) items.push({category: currentCategory, text: buffer.join('\\n').trim()});
+    buffer = [];
+  }
+
+  for (const line of lines) {
+    if (line.trim() === '---') { flushItem(); mode = 'summary'; continue; }
+    if (mode === 'intro') {
+      if (line.startsWith('>')) continue;
+      if (line.trim() === '') continue;
+      mode = 'items';
+    }
+    if (mode === 'items') {
+      const m = line.match(/^📰\s*\*\*\[([^\]]+)\]\s*(.*)$/);
+      if (m) { flushItem(); currentCategory = m[1].trim(); buffer.push('📰 **' + m[2]); }
+      else { buffer.push(line); }
+      continue;
+    }
+    summary.push(line);
+  }
+  flushItem();
+
+  return { items, summaryText: summary.join('\\n').trim() };
+}
+
+// Renders each category as its own card. Falls back to one block if no [Category] tags found.
+function mbFormatBody(content, noteId) {
+  const { items, summaryText } = mbParse(content);
+
+  if (!items.length) return `<div class="mb-note-body">${marked.parse(content || '')}</div>`;
+
+  const order = [];
+  const groups = {};
+  items.forEach(it => {
+    if (!groups[it.category]) { groups[it.category] = []; order.push(it.category); }
+    groups[it.category].push(it.text);
+  });
+
+  const summaryHtml = summaryText ? `<div class="mb-note-body mb-note-summary">${marked.parse(summaryText)}</div>` : '';
+
+  const gridId = 'mb-grid-' + noteId;
+  const filterHtml = order.length > 1 ? `<div class="mb-category-filter">
+    <button class="mb-filter-btn active" onclick="mbFilterCategory(this,'${gridId}','all')">All</button>
+    ${order.map(cat => `<button class="mb-filter-btn" onclick="mbFilterCategory(this,'${gridId}','${cat}')">${cat}</button>`).join('')}
+  </div>` : '';
+
+  const categoriesHtml = `<div class="mb-category-grid" id="${gridId}">${order.map(cat => `
+    <div class="mb-category-card" data-category="${cat}">
+      <div class="mb-category-head">${cat}</div>
+      ${groups[cat].map(t => `<div class="mb-note-body mb-cat-item">${marked.parse(t)}</div>`).join('')}
+    </div>
+  `).join('')}</div>`;
+
+  _mbGridCache[gridId] = categoriesHtml;
+  return summaryHtml + filterHtml + categoriesHtml;
+}
+
+// "All" restores the current day's category grid. Picking a specific category instead
+// shows that category's news across every loaded day, most recent first, each item
+// tagged with its date.
+function mbFilterCategory(btn, gridId, cat) {
+  btn.parentElement.querySelectorAll('.mb-filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const grid = document.getElementById(gridId);
+  if (!grid) return;
+  if (cat === 'all') {
+    grid.innerHTML = _mbGridCache[gridId] || '';
+    return;
+  }
+  const dated = [];
+  _mbNotes.slice().sort((a, b) => b.date.localeCompare(a.date)).forEach(n => {
+    mbParse(n.content).items
+      .filter(it => it.category === cat)
+      .forEach(it => dated.push({date: n.date, text: it.text}));
+  });
+  grid.innerHTML = `<div class="mb-category-card" data-category="${cat}">
+    <div class="mb-category-head">${cat}</div>
+    ${dated.map(d => `<div class="mb-note-body mb-cat-item">${marked.parse(d.text)}<div class="mb-cat-date">${d.date}</div></div>`).join('')}
+  </div>`;
+}
+
+async function mbDelete(date) {
+  if (!confirm('Delete brief for ' + date + '?')) return;
+  try {
+    await fetch('/market/note/delete', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date})});
+    await mbLoad();
+  } catch(e) {}
 }
 """
 
     # ── Chart JS
     chart_js = (
-        f"const donutCtx = document.getElementById('donut').getContext('2d');\n"
-        f"new Chart(donutCtx, {{\n"
-        f"  type: 'doughnut',\n"
-        f"  data: {{ labels: {json.dumps(chart_labels)}, datasets: [{{ data: {json.dumps(chart_values)}, backgroundColor: {json.dumps(chart_colors)}, borderWidth: 0, hoverOffset: 6 }}] }},\n"
-        f"  options: {{ plugins: {{ legend: {{ position: 'right', labels: {{ color: '#94a3b8', font: {{ size: 11 }} }} }} }}, cutout: '65%' }}\n"
-        f"}});\n\n"
         f"const barCtx = document.getElementById('bar').getContext('2d');\n"
         f"new Chart(barCtx, {{\n"
         f"  type: 'bar',\n"
-        f"  data: {{ labels: {json.dumps(proto_labels)}, datasets: [{{ data: {json.dumps(proto_values)}, backgroundColor: {json.dumps(proto_colors[:len(proto_values)])}, borderRadius: 6, borderWidth: 0 }}] }},\n"
+        f"  data: {{ labels: {json.dumps(proto_labels)}, datasets: [{{ data: {json.dumps(proto_values)}, backgroundColor: {json.dumps(proto_colors)}, borderRadius: 6, borderWidth: 0 }}] }},\n"
         f"  options: {{\n"
         f"    indexAxis: 'y',\n"
-        f"    plugins: {{ legend: {{ display: false }} }},\n"
+        f"    maintainAspectRatio: false,\n"
+        f"    layout: {{ padding: {{ right: 80 }} }},\n"
+        f"    plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: ctx => ' $' + ctx.parsed.x.toLocaleString(undefined, {{minimumFractionDigits:0,maximumFractionDigits:0}}) }} }} }},\n"
         f"    scales: {{\n"
-        f"      x: {{ grid: {{ color: '#ffffff0a' }}, ticks: {{ color: '#64748b', callback: v => '$' + v.toLocaleString() }} }},\n"
-        f"      y: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 10 }} }} }}\n"
+        f"      x: {{ display: false }},\n"
+        f"      y: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 11 }} }} }}\n"
         f"    }}\n"
-        f"  }}\n"
+        f"  }},\n"
+        f"  plugins: [{{ id:'barLabels', afterDatasetsDraw(chart) {{\n"
+        f"    const {{ctx, scales: {{x, y}}}} = chart;\n"
+        f"    chart.data.datasets[0].data.forEach((v, i) => {{\n"
+        f"      const bar = chart.getDatasetMeta(0).data[i];\n"
+        f"      ctx.save(); ctx.fillStyle='#94a3b8'; ctx.font='11px monospace';\n"
+        f"      ctx.textAlign='left'; ctx.textBaseline='middle';\n"
+        f"      ctx.fillText('$'+v.toLocaleString(undefined,{{maximumFractionDigits:0}}), bar.x+8, bar.y);\n"
+        f"      ctx.restore();\n"
+        f"    }});\n"
+        f"  }}}}]\n"
         f"}});\n"
     )
 
@@ -2235,7 +2870,7 @@ async function triggerRefresh() {
         f"    labels: {json.dumps(hist_dates)},\n"
         f"    datasets: [\n"
         f"      {{ label: 'Total', data: {json.dumps(hist_total)}, borderColor: '#f1f5f9', backgroundColor: '#f1f5f908', borderWidth: 2, pointRadius: 2, tension: 0.3, fill: false }},\n"
-        f"      {{ label: 'Crypto', data: {json.dumps(hist_crypto)}, borderColor: '#f97316', backgroundColor: '#f9731608', borderWidth: 1.5, pointRadius: 2, tension: 0.3, fill: false }},\n"
+        f"      {{ label: 'Crypto', data: {json.dumps(hist_crypto)}, borderColor: '#4da2ff', backgroundColor: '#4da2ff08', borderWidth: 1.5, pointRadius: 2, tension: 0.3, fill: false }},\n"
         f"      {{ label: 'Stocks', data: {json.dumps(hist_stock)}, borderColor: '#6366f1', backgroundColor: '#6366f108', borderWidth: 1.5, pointRadius: 2, tension: 0.3, fill: false }}\n"
         f"    ]\n"
         f"  }},\n"
@@ -2253,7 +2888,128 @@ async function triggerRefresh() {
         f"  }}\n"
         f"}});\n"
     )
-    chart_js += history_js + interest_js
+    # Category chart data
+    cat_labels = []
+    cat_values = []
+    cat_colors_chart = []
+    _cat_data = [
+        ("AMM",     amm_total,                    "#f97316"),
+        ("Lending", lending_total + lending_bn,   "#3b82f6"),
+        ("Staking", onchain_total,                "#10b981"),
+        ("Futures", cex_total,                    "#f59e0b"),
+        ("Stocks",  stocks_total,                 "#8b5cf6"),
+    ]
+    for lbl, val, col in sorted(_cat_data, key=lambda x: -x[1]):
+        if val > 0:
+            cat_labels.append(lbl)
+            cat_values.append(round(val, 2))
+            cat_colors_chart.append(col)
+
+    cat_js = (
+        f"const catCtx = document.getElementById('cat-chart').getContext('2d');\n"
+        f"new Chart(catCtx, {{\n"
+        f"  type: 'bar',\n"
+        f"  data: {{ labels: {json.dumps(cat_labels)}, datasets: [{{ data: {json.dumps(cat_values)}, backgroundColor: {json.dumps(cat_colors_chart)}, borderRadius: 6, borderWidth: 0 }}] }},\n"
+        f"  options: {{\n"
+        f"    indexAxis: 'y', maintainAspectRatio: false,\n"
+        f"    layout: {{ padding: {{ right: 90 }} }},\n"
+        f"    plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: ctx => ' $' + ctx.parsed.x.toLocaleString(undefined,{{maximumFractionDigits:0}}) }} }} }},\n"
+        f"    scales: {{ x: {{ display: false }}, y: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 12 }} }} }} }}\n"
+        f"  }},\n"
+        f"  plugins: [{{ id:'catLabels', afterDatasetsDraw(chart) {{\n"
+        f"    const {{ctx, scales: {{x, y}}}} = chart;\n"
+        f"    chart.data.datasets[0].data.forEach((v, i) => {{\n"
+        f"      const bar = chart.getDatasetMeta(0).data[i];\n"
+        f"      ctx.save(); ctx.fillStyle='#94a3b8'; ctx.font='11px monospace';\n"
+        f"      ctx.textAlign='left'; ctx.textBaseline='middle';\n"
+        f"      ctx.fillText('$'+v.toLocaleString(undefined,{{maximumFractionDigits:0}}), bar.x+8, bar.y);\n"
+        f"      ctx.restore();\n"
+        f"    }});\n"
+        f"  }}}}]\n"
+        f"}});\n"
+    )
+
+    chart_switch_js = """
+function switchChart(tab) {
+  document.querySelectorAll('.chart-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.chart-pane').forEach(p => p.classList.remove('active'));
+  document.querySelector('.chart-tab[data-tab="'+tab+'"]').classList.add('active');
+  document.getElementById('pane-'+tab).classList.add('active');
+}
+"""
+
+    chart_js += history_js + cat_js + interest_js + chart_switch_js
+
+    bar_h = max(320, len(proto_labels) * 34)
+    cat_h = max(160, len(cat_labels) * 52)
+
+    tabbed_chart = (
+        '<div class="chart-card priv-chart">'
+        '<div class="chart-tabs">'
+        '<button class="chart-tab active" data-tab="history" onclick="switchChart(\'history\')">Portfolio History</button>'
+        '<button class="chart-tab" data-tab="protocol" onclick="switchChart(\'protocol\')">By Protocol</button>'
+        '<button class="chart-tab" data-tab="category" onclick="switchChart(\'category\')">By Category</button>'
+        '</div>'
+        '<div id="pane-history" class="chart-pane active"><canvas id="history-chart"></canvas></div>'
+        f'<div id="pane-protocol" class="chart-pane"><div style="height:{bar_h}px"><canvas id="bar"></canvas></div></div>'
+        f'<div id="pane-category" class="chart-pane"><div style="height:{cat_h}px"><canvas id="cat-chart"></canvas></div></div>'
+        '</div>'
+    )
+
+    # ── Market Brief page (dynamic via JS fetch from /market/notes)
+    market_page_html = f"""
+<style>
+.mb-grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}}
+@media(max-width:700px){{.mb-grid{{grid-template-columns:1fr}}}}
+.mb-history-card{{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:22px 24px}}
+.mb-history-head-row{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px;padding-bottom:12px;border-bottom:1px solid var(--border)}}
+.mb-history-head{{font-size:.65rem;text-transform:uppercase;letter-spacing:.09em;font-weight:700;color:var(--text3)}}
+.mb-date-picker{{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:.82rem;font-weight:600;color:var(--text);font-family:inherit;cursor:pointer;color-scheme:dark}}
+.mb-note{{padding:16px 0;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:6px}}
+.mb-note:last-child{{border-bottom:none;padding-bottom:0}}
+.mb-note-header{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}
+.mb-note-date{{font-size:.74rem;font-weight:700;color:var(--accent2);font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;margin-top:2px}}
+.mb-note-title{{font-size:1.05rem;font-weight:700;color:var(--text);line-height:1.4}}
+.mb-note-body{{font-size:.98rem;color:var(--text2);line-height:1.85}}
+.mb-note-body p{{margin:0 0 14px}}
+.mb-note-body p:last-child{{margin-bottom:0}}
+.mb-note-body h1,.mb-note-body h2,.mb-note-body h3{{color:var(--text);font-weight:700;line-height:1.4;margin:22px 0 10px}}
+.mb-note-body h1:first-child,.mb-note-body h2:first-child,.mb-note-body h3:first-child{{margin-top:0}}
+.mb-note-body h1{{font-size:1.2rem}}
+.mb-note-body h2{{font-size:1.1rem}}
+.mb-note-body h3{{font-size:1.02rem}}
+.mb-note-body strong{{color:var(--text);font-weight:700}}
+.mb-note-body a{{color:var(--accent);text-decoration:none;word-break:break-all}}
+.mb-note-body a:hover{{text-decoration:underline}}
+.mb-note-body ul,.mb-note-body ol{{margin:0 0 14px;padding-left:22px}}
+.mb-note-body li{{margin-bottom:6px}}
+.mb-note-body blockquote{{border-left:2px solid var(--border2);padding-left:14px;margin:0 0 14px;color:var(--text3);font-style:italic}}
+.mb-note-body blockquote p{{margin-bottom:0}}
+.mb-note-body hr{{border:none;border-top:1px solid var(--border);margin:20px 0}}
+.mb-category-grid{{display:flex;flex-direction:column;gap:16px;margin-bottom:4px}}
+.mb-category-card{{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:18px 20px}}
+.mb-category-head{{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700;color:var(--accent);margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border)}}
+.mb-cat-item{{padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--border)}}
+.mb-cat-item:last-child{{padding-bottom:0;margin-bottom:0;border-bottom:none}}
+.mb-cat-date{{text-align:right;font-size:.68rem;font-family:'SF Mono',ui-monospace,monospace;color:var(--text3);margin-top:6px}}
+.mb-note-summary{{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin-bottom:16px}}
+.mb-note-summary p{{margin:0}}
+.mb-category-filter{{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}}
+.mb-filter-btn{{background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:7px 16px;font-size:.78rem;font-weight:600;color:var(--text2);cursor:pointer;transition:all .15s;font-family:inherit}}
+.mb-filter-btn:hover{{border-color:var(--accent);color:var(--text)}}
+.mb-filter-btn.active{{background:linear-gradient(135deg,#4da2ff,#6fbcf0);border-color:transparent;color:#fff}}
+.mb-note-del{{background:none;border:none;color:var(--text3);font-size:.75rem;cursor:pointer;padding:2px 6px;border-radius:5px;transition:all .15s;flex-shrink:0}}
+.mb-note-del:hover{{color:var(--red);background:#f8717115}}
+.mb-empty{{color:var(--text3);font-size:.82rem;text-align:center;padding:32px 0}}
+</style>
+<div class="mb-history-card">
+  <div class="mb-history-head-row">
+    <div class="mb-history-head">Daily Brief</div>
+    <input type="date" id="mb-date-picker" class="mb-date-picker" onchange="mbSelectDate(this.value)">
+  </div>
+  <div id="mb-history-list"><div class="mb-empty">No briefs yet.</div></div>
+</div>
+"""
 
     # ── Assemble HTML
     page1 = (
@@ -2263,13 +3019,8 @@ async function triggerRefresh() {
         f'<div class="stat-card"><div class="sc-lbl">Net Value</div><div class="sc-val">{fmt(net_value)}</div></div>'
         f'<div class="stat-card"><div class="sc-lbl">Positions</div><div class="sc-val">{len(positions)}</div></div>'
         '</div>'
-        '<div class="charts-row">'
-        '<div class="chart-card"><h3>Category Allocation</h3><canvas id="donut"></canvas></div>'
-        '<div class="chart-card"><h3>Value by Protocol</h3><canvas id="bar"></canvas></div>'
-        '</div>'
-        '<div class="chart-card" style="margin-bottom:24px"><h3>Portfolio History</h3><canvas id="history-chart"></canvas></div>'
-        + token_summary_html +
-        '<div class="alloc-card"><h3>Breakdown</h3>' + cat_rows + '</div>'
+        + tabbed_chart +
+        token_summary_html +
         '<div class="risk-row">' + risk_cards + '</div>'
     )
 
@@ -2318,6 +3069,26 @@ async function triggerRefresh() {
         '    </div>'
         '  </div>'
         '</div>'
+        '<div id="login-ov" class="modal-ov">'
+        '  <div class="modal-box" style="max-width:320px">'
+        '    <div class="modal-header">'
+        '      <span style="font-weight:700">Unlock View</span>'
+        '      <button class="modal-close" onclick="closeLoginModal()">&#10005;</button>'
+        '    </div>'
+        '    <div style="padding:16px 0 0">'
+        '    <div class="se-field">'
+        '      <span class="se-lbl">Username</span>'
+        '      <input id="login-user" class="se-input" type="text" autocomplete="off">'
+        '    </div>'
+        '    <div class="se-field">'
+        '      <span class="se-lbl">Password</span>'
+        '      <input id="login-pass" class="se-input" type="password" autocomplete="off" onkeydown="if(event.key===\'Enter\')submitLogin()">'
+        '      <span id="login-error" class="se-hint" style="color:#f87171;display:none">Incorrect username or password.</span>'
+        '    </div>'
+        '    <button class="se-save" onclick="submitLogin()">Unlock</button>'
+        '    </div>'
+        '  </div>'
+        '</div>'
     )
 
     return (
@@ -2326,18 +3097,25 @@ async function triggerRefresh() {
         '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
         '<title>Portfolio Dashboard</title>\n'
         '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>\n'
+        '<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>\n'
         '<style>' + CSS + '</style>\n'
         '</head>\n<body>\n\n'
         '<nav class="top-nav">\n'
-        '  <div class="nav-brand">Portfolio Dashboard</div>\n'
-        '  <div class="tab-group">\n'
-        '    <button class="tab-btn active" data-page="overview" onclick="showPage(\'overview\')">Overview</button>\n'
-        '    <button class="tab-btn" data-page="interest" onclick="showPage(\'interest\')">Cashflow</button>\n'
-        '    <button class="tab-btn" data-page="positions" onclick="showPage(\'positions\')">Positions</button>\n'
+        '  <div class="nav-left">\n'
+        '  <div class="nav-brand" onclick="goToMarket()">Kive <span style="color:#bc7def">Dashboard</span></div>\n'
+        '  <div class="page-menu" id="page-menu">\n'
+        '    <div class="page-menu-item active" id="page-menu-market" onclick="selectPage(\'market\',\'Market\',this)">Market</div>\n'
+        '    <div class="page-menu-item" onclick="selectPage(\'overview\',\'Overview\',this)">Overview</div>\n'
+        '    <div class="page-menu-item" onclick="selectPage(\'interest\',\'Cashflow\',this)">Cashflow</div>\n'
+        '    <div class="page-menu-item" onclick="selectPage(\'positions\',\'Positions\',this)">Positions</div>\n'
+        '  </div></div>\n'
+        f'  <div class="nav-right"><div class="nav-ts">Updated {ts}</div>\n'
+        '  <button id="privacy-btn" class="nav-refresh-btn" onclick="togglePrivacy()" title="Hide numbers"><span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></span></button>\n'
+        '  <button id="refresh-btn" class="nav-refresh-btn" onclick="triggerRefresh()" title="Refresh"><span>&#8635;</span></button>\n'
         '  </div>\n'
-        f'  <div class="nav-right"><div class="nav-total-wrap"><div class="nav-total-lbl">Portfolio</div><div class="nav-total">{fmt(grand)}</div></div><div class="nav-ts">Updated {ts}</div><button id="refresh-btn" class="nav-refresh-btn" onclick="triggerRefresh()">&#8635; Refresh</button></div>\n'
         '</nav>\n\n'
-        '<div id="page-overview" class="page active">\n' + page1 + '\n</div>\n\n'
+        '<div id="page-market" class="page active">\n' + market_page_html + '\n</div>\n\n'
+        '<div id="page-overview" class="page">\n' + page1 + '\n</div>\n\n'
         '<div id="page-interest" class="page">\n' + page3 + '\n</div>\n\n'
         '<div id="page-positions" class="page">\n' + page2_html + '\n</div>\n\n'
         '<div id="modal-ov" class="modal-ov" onclick="closeModal()">\n'
@@ -2354,7 +3132,7 @@ async function triggerRefresh() {
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
+def main(write_history=False):
     print("=" * 54)
     print("  Portfolio Dashboard Generator")
     print("=" * 54)
@@ -2426,6 +3204,9 @@ def main():
     sc_borr_usd = sum(b["usd"] for b in sc_borrs)
     sc_net      = sc_supply_usd + sc_dep_usd - sc_borr_usd
 
+    print("[5a/8] Fetching lending rewards (NAVX/SEND/SCA) ...")
+    lending_rewards = fetch_lending_rewards(WALLET_954C, prices)
+
     print("[5b/8] Fetching Ember eBLUE vault position ...")
     ember = fetch_ember_eblue(prices.get("BLUE", 0))
 
@@ -2450,6 +3231,10 @@ def main():
     clmm_e64c_list  = fetch_cetus_clmm(WALLET_E64C, sui)
     clmm_e64c_total = sum(p["total_usd"] for p in clmm_e64c_list)
 
+    print("[8b/10] Fetching Bluefin CLMM positions (0xe64c) ...")
+    bluefin_clmm_list  = fetch_bluefin_clmm(WALLET_E64C, prices)
+    bluefin_clmm_total = sum(p["total_usd"] for p in bluefin_clmm_list)
+
     total_5050 = sl_proto.get("steamm_lp", {}).get("usd", 0.0)
 
     print("[9/10] Fetching stock prices ...")
@@ -2457,33 +3242,33 @@ def main():
     fetch_stock_prices(stocks)
     save_stocks(stocks)
 
-    amm_total     = amm_8020["total"] + total_5050 + aftermath["total"] + clmm_e64c_total
+    amm_total     = amm_8020["total"] + total_5050 + aftermath["total"] + clmm_e64c_total + bluefin_clmm_total
     lending_total = navi["net"] + sl_net + sc_net
     cex_total     = binance["futures_margin"]
     stocks_total  = sum(s.get("market_value", 0) for s in stocks)
     crypto_total  = amm_total + lending_total + onchain_total + cex_total
     grand_total   = crypto_total + stocks_total
 
-    # Append to history on Wednesdays only (keeps chart weekly)
+    # Append to history only when explicitly requested (via update_weekly.py at 23:45)
     history = load_history()
-    now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
-    if now.weekday() == 2:  # Wednesday
+    today = datetime.now().strftime("%Y-%m-%d")
+    if write_history:
         entry = {"date": today, "crypto": round(crypto_total, 2), "stock": round(stocks_total, 2), "total": round(grand_total, 2)}
         if history and history[-1]["date"] == today:
             history[-1] = entry
         else:
             history.append(entry)
-    save_history(history)
+        save_history(history)
 
     data = {
         "prices":    prices,
-        "timestamp": datetime.now().strftime("%Y-%m-%d  %H:%M:%S"),
+        "timestamp": datetime.now(BANGKOK_TZ).strftime("%H:%M  %d-%m-%y"),
         "grand_total":    grand_total,
         "amm_total":      amm_total,
         "lending_total":  lending_total,
         "onchain_total":  onchain_total,
-        "clmm_e64c_total": clmm_e64c_total,
+        "clmm_e64c_total":    clmm_e64c_total,
+        "bluefin_clmm_total": bluefin_clmm_total,
         "cex_total":      cex_total,
         "amm_8020": amm_8020,
         "amm_5050": {
@@ -2499,11 +3284,13 @@ def main():
                          "xcetus_amt": xcetus_amt, "xcetus_usd": xcetus_usd,
                          "sc_supply": sc_supply, "sc_deps": sc_deps, "sc_borrs": sc_borrs,
                          "sc_net": sc_net},
-        "clmm_e64c": clmm_e64c_list,
+        "clmm_e64c":    clmm_e64c_list,
+        "bluefin_clmm": bluefin_clmm_list,
         "aftermath": aftermath,
         "ember": ember,
         "stzent": stzent,
         "binance": binance,
+        "lending_rewards": lending_rewards,
         "stocks":       stocks,
         "stocks_total": stocks_total,
         "history":      history,
@@ -2522,4 +3309,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--save-history", action="store_true",
+                        help="Append today's totals to history.json (run by update_weekly.py only)")
+    args = parser.parse_args()
+    main(write_history=args.save_history)

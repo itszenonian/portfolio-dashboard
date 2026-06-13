@@ -7,6 +7,12 @@ history.json
 interest_data.json
 portfolio_dashboard.html
 
+# Runtime / generated data and logs
+market_notes.json
+news update/
+refresh.log
+*.log
+
 # Python
 __pycache__/
 *.pyc

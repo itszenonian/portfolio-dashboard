@@ -223,7 +223,13 @@ def main():
     args = parser.parse_args()
 
     now_thai  = datetime.now(THAI_TZ)
-    date_str  = args.date if args.date else now_thai.strftime("%-m/%-d/%Y")
+    if args.date:
+        from datetime import datetime as dt
+        _override = dt.strptime(args.date, "%m/%d/%Y").replace(tzinfo=THAI_TZ)
+        date_str  = args.date
+        now_thai  = _override
+    else:
+        date_str  = now_thai.strftime("%-m/%-d/%Y")
 
     if args.read_sheet or (args.main is None and args.mm is None):
         print("[0/4] Reading Main + MM from Google Sheet...")
@@ -249,10 +255,10 @@ def main():
     print(f"  Main: ${main_earn:.2f}  MM: ${mm_earn:.2f}  Total: ${weekly:.2f}")
     print(f"{'='*50}\n")
 
-    # 1. Regenerate dashboard to get fresh portfolio data
+    # 1. Regenerate dashboard to get fresh portfolio data (--save-history writes to history.json)
     print("[1/4] Regenerating dashboard (fetching live data)...")
     result = subprocess.run(
-        [sys.executable, str(BASE / "generate_dashboard.py")],
+        [sys.executable, str(BASE / "generate_dashboard.py"), "--save-history"],
         capture_output=True, text=True, timeout=300
     )
     if result.returncode != 0:
@@ -276,9 +282,9 @@ def main():
 
     # Load previous entry to calculate % changes
     interest_data = load_interest_data()
-    prev_crypto = interest_data[-1]["crypto"] if interest_data else crypto_val
-    prev_stock  = interest_data[-1]["stock"]  if interest_data else stock_val
-    prev_total  = interest_data[-1]["total"]  if interest_data else total_val
+    prev_crypto = interest_data[-1].get("crypto", crypto_val) if interest_data else crypto_val
+    prev_stock  = interest_data[-1].get("stock",  stock_val)  if interest_data else stock_val
+    prev_total  = interest_data[-1].get("total",  total_val)  if interest_data else total_val
     pct_crypto  = round((crypto_val - prev_crypto) / prev_crypto * 100, 2) if prev_crypto else 0
     pct_stock   = round((stock_val  - prev_stock)  / prev_stock  * 100, 2) if prev_stock  else 0
     pct_total   = round((total_val  - prev_total)  / prev_total  * 100, 2) if prev_total  else 0
