@@ -6,13 +6,14 @@ Queries: Walrus Staking, Cetus xCETUS, Scallop Lending
 
 import sys
 import time
+import os
 import requests
 from datetime import datetime
 
 sys.path.insert(0, "/Users/zenonian/Desktop/Claude/Projects/Portfolio tracker project")
 from Dexscreener_API import price_in_sui, PAIRS
 
-WALLET  = "0xWALLET_954C_REDACTED"
+WALLET  = os.getenv("WALLET_954C", "")
 RPC     = "https://fullnode.mainnet.sui.io"
 
 SCALLOP_BS_TABLE = "0x8708eb23153bdc4b345c9f536fe05b62206f3f55629b26389d4fe5f129bd8368"

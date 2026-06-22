@@ -8,6 +8,7 @@ lending market and obligation objects on-chain.
 
 import sys
 import time
+import os
 import requests
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,7 +18,7 @@ from Dexscreener_API import price_in_sui, PAIRS
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-WALLET  = "0xWALLET_954C_REDACTED"
+WALLET  = os.getenv("WALLET_954C", "")
 RPC     = "https://fullnode.mainnet.sui.io"
 
 SUILEND_PKG     = "0xf95b06141ed4a174f239417323bde3f209b972f5930d8521ea38a52aff3a6ddf"

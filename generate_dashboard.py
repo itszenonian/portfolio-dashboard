@@ -32,6 +32,7 @@ RPC      = "https://mainnet.sui.rpcpool.com"
 _BV_RPC  = "https://sui-mainnet-endpoint.blockvision.org"
 WALLET_954C    = os.getenv("WALLET_954C", "")
 WALLET_E64C    = os.getenv("WALLET_E64C", "")
+DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "changeme")
 SCALLOP_BS_TBL = "0x8708eb23153bdc4b345c9f536fe05b62206f3f55629b26389d4fe5f129bd8368"
 OBLIGATION_CAP = "::lending_market::ObligationOwnerCap"
 CETUS_POS_TYPE   = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position"
@@ -3557,7 +3558,8 @@ function switchChart(tab) {
         '</div>'
     )
 
-    LP_WALLET = "0xLP_WALLET_REDACTED"
+    LP_WALLET = os.getenv("LP_WALLET", "")
+    USDC_WALLET = os.getenv("USDC_WALLET", "")
     LP_POOL   = "0x440e5e3b13b8220c5c338bb5a4291cab5c58064eaf3654c77f3e9aed5147689c"
     graph_path = Path(__file__).parent / "assets" / "sui_vol_backtest_7d.png"
     if graph_path.exists():
@@ -3709,7 +3711,7 @@ function switchChart(tab) {
         '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px 16px">'
         '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:6px">Receive address</div>'
         '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--accent2);'
-        'word-break:break-all;line-height:1.5">0xUSDC_WALLET_REDACTED</div>'
+        f'word-break:break-all;line-height:1.5">{USDC_WALLET}</div>'
         '</div>'
         '</div>'
         '</div>'
@@ -3884,7 +3886,7 @@ function renderLpBacktest(){
         '</div>\n\n'
         + stock_modals + '\n\n'
         + modals_html + '\n\n'
-        '<script>\n' + JS + '\n' + chart_js + '\n' + lp_backtest_js + '\n</script>\n'
+        '<script>\n' + JS.replace('__DASH_PASS__', DASHBOARD_PASS) + '\n' + chart_js + '\n' + lp_backtest_js + '\n</script>\n'
         '</body>\n</html>'
     )
 

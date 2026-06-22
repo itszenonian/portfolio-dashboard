@@ -6,13 +6,14 @@ Reads eBLUE vault share holdings from Sui RPC, converts to underlying BLUE
 using the on-chain vault exchange rate, and fetches USD price.
 """
 
+import os
 import requests
 import json
 import time
 from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
-WALLET = "0xWALLET_954C_REDACTED"
+WALLET = os.getenv("WALLET_954C", "")
 
 RPCS = {
     "Sui Fullnode": "https://fullnode.mainnet.sui.io",
