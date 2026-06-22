@@ -2191,7 +2191,7 @@ def build_html(data):
             f'<tr>'
             f'<td style="color:#a1a1aa;font-size:.78rem">{lbl}</td>'
             f'<td class="priv" style="text-align:right;font-family:monospace;color:#e2e8f0">${main:,.2f}</td>'
-            f'<td class="priv" style="text-align:right;font-family:monospace;color:#60a5fa">${mm:,.2f}</td>'
+            f'<td class="priv" style="text-align:right;font-family:monospace;color:#e2e8f0">${mm:,.2f}</td>'
             f'<td class="priv" style="text-align:right;font-family:monospace;font-weight:600;color:#f1f5f9">${wk:,.2f}</td>'
             f'<td class="priv" style="text-align:right;font-family:monospace;color:#64748b">${running:,.2f}</td>'
             f'<td style="text-align:right;font-family:monospace;color:{"#10b981" if yld and yld>=15 else "#f59e0b" if yld else "#475569"}">{yld_str}</td>'
