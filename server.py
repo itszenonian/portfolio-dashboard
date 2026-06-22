@@ -64,6 +64,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+        elif self.path.startswith('/assets/'):
+            rel = self.path.split('?', 1)[0].lstrip('/')
+            asset_path = (BASE / rel).resolve()
+            assets_root = (BASE / 'assets').resolve()
+            if not str(asset_path).startswith(str(assets_root)) or not asset_path.exists() or not asset_path.is_file():
+                self.send_error(404)
+                return
+            ctype = 'application/octet-stream'
+            if asset_path.suffix.lower() == '.png':
+                ctype = 'image/png'
+            elif asset_path.suffix.lower() in ('.jpg', '.jpeg'):
+                ctype = 'image/jpeg'
+            elif asset_path.suffix.lower() == '.webp':
+                ctype = 'image/webp'
+            content = asset_path.read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
         elif self.path == '/market/notes':
             notes_path = BASE / 'market_notes.json'
             notes = json.loads(notes_path.read_text()) if notes_path.exists() else []

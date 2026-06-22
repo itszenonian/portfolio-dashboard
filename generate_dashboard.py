@@ -12,6 +12,7 @@ import hashlib
 import time
 import json
 import os
+import base64
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -38,6 +39,20 @@ BLUEFIN_POS_TYPE = "0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c
 
 COIN_DEC = {"USDC": 6, "USDT": 6, "DEEP": 6, "ETH": 8, "WBTC": 8, "LBTC": 8, "XBTC": 8}
 
+# Scallop sCoin names (scallop_zwbtc, scallop_ha_sui, ...) don't match the rate-table /
+# price keys. Map the stripped sCoin name -> the underlying market symbol used for the
+# exchange rate, price and decimals. (zWBTC is valued via the WBTC market.)
+SCOIN_ALIAS = {
+    "HA_SUI": "HASUI", "AF_SUI": "AFSUI",
+    "WORMHOLE_ETH": "ETH", "WORMHOLE_USDT": "USDT",
+    "ZWBTC": "WBTC",
+}
+# Pretty display labels for those sCoins in the Scallop supply rows.
+SCOIN_DISPLAY = {
+    "ZWBTC": "BTC", "HA_SUI": "haSUI", "AF_SUI": "afSUI",
+    "WORMHOLE_ETH": "ETH", "WORMHOLE_USDT": "USDT",
+}
+
 # NAVI protocol — global storage + per-reserve user_state tables
 NAVI_RESERVES_TABLE    = "0xe6d4c6610b86ce7735ea754596d71d72d10c7980b5052fc3c8cdf8d09fea9b4b"
 NAVI_VSUI_SUPPLY_TABLE = "0xe6457d247b6661b1cac123351998f88f3e724ff6e9ea542127b5dcb3176b3841"
@@ -45,8 +60,8 @@ NAVI_USDSUI_BORROW_TABLE = "0xdc9b3a385ea7c6dc443235db7ff9d82188a3e6f5b9af6e765a
 NAVI_VSUI_IDX   = 5
 NAVI_USDSUI_IDX = 34
 
-# Aftermath SUI/USDC 80/20 (wallet 0x954c — staked LP)
-AFTER_SUIUSDC_STAKE_ID = "0x391643800554dcf6d2747e47ea4f9e2473e813d97ab1b60175d48e3c731cbd6f"
+# Aftermath SUI/USDC 80/20 (moved to wallet 0xe64c — staked LP; restaked 2026-06-17)
+AFTER_SUIUSDC_STAKE_ID = "0xba9477bb10b80b72833b639495677b8ed90b499a4a5da25a1e7932c011e6ef8b"
 AFTER_SUIUSDC_VAULT_ID = "0x0819f52c064eef993370aea4658affd3d73d5bad03b6a44c7bf8ab47eb537d06"
 AFTER_SUIUSDC_POOL_ID  = "0xb0cc4ce941a6c6ac0ca6d8e6875ae5d86edbec392c3333d008ca88f377e5e181"
 
@@ -231,7 +246,7 @@ def fetch_scallop_supply(wallet, prices):
     dfs    = rpc("suix_getDynamicFields", [SCALLOP_BS_TBL, None, 50]) or {}
     sym_id = {d["name"]["value"]["name"].split("::")[-1].upper(): d["objectId"]
               for d in dfs.get("data", [])}
-    ids = [sym_id[s] for s, _ in sc_tokens if s in sym_id]
+    ids = [sym_id[SCOIN_ALIAS.get(s, s)] for s, _ in sc_tokens if SCOIN_ALIAS.get(s, s) in sym_id]
     rates = {}
     if ids:
         for o in multi_get(ids):
@@ -246,14 +261,15 @@ def fetch_scallop_supply(wallet, prices):
 
     rows = []
     for underlying, raw_sc in sc_tokens:
-        rate  = rates.get(underlying)
+        key   = SCOIN_ALIAS.get(underlying, underlying)   # rate / price / decimals key
+        rate  = rates.get(key)
         if rate is None: continue
-        dec   = COIN_DEC.get(underlying, 9)
+        dec   = COIN_DEC.get(key, 9)
         amt   = raw_sc * rate / (10 ** dec)
-        price = prices.get(underlying)
+        price = prices.get(key)
         usd   = amt * price if price else None
         if usd and usd >= 0.01:
-            rows.append({"sym": underlying, "amount": amt, "usd": usd})
+            rows.append({"sym": SCOIN_DISPLAY.get(underlying, underlying), "amount": amt, "usd": usd})
     return rows
 
 
@@ -1406,15 +1422,21 @@ def _build_positions(data, p):
             sc_modal.append({"sym": r["sym"], "amount": r["amount"], "usd": r["usd"]})
     if oc["sc_deps"]:
         sc_modal.append({"section": "Collateral"})
+        _sui_p = p.get("SUI") or 1.0
+        _hasui_ratio = (p.get("HASUI", _sui_p) / _sui_p) if _sui_p else 1.0
         for d in oc["sc_deps"]:
-            sc_modal.append({"sym": d["sym"], "amount": d["amount"], "usd": d["usd"]})
+            disp = "haSUI" if d["sym"] == "HASUI" else d["sym"]
+            sc_modal.append({"sym": disp, "amount": d["amount"], "usd": d["usd"]})
+            if d["sym"] == "HASUI":
+                _eq = d["amount"] * _hasui_ratio
+                sc_modal.append({"sym": "SUI", "amount": _eq, "usd": _eq * _sui_p, "dim": True, "note": "equiv"})
     if oc["sc_borrs"]:
         sc_modal.append({"section": "Borrows"})
         for bv in oc["sc_borrs"]:
             sc_modal.append({"sym": bv["sym"], "amount": bv["amount"], "usd": bv["usd"], "is_debt": True})
     sc_card_rows = (
         [(r["sym"], f"{r['amount']:,.4f}", False) for r in oc["sc_supply"][:1]] +
-        [(d["sym"], f"{d['amount']:,.4f}", False) for d in oc["sc_deps"][:2]] +
+        [(("haSUI" if d["sym"]=="HASUI" else d["sym"]), f"{d['amount']:,.4f}", False) for d in oc["sc_deps"][:2]] +
         [(bv["sym"], f"{bv['amount']:,.2f}", True) for bv in oc["sc_borrs"][:1]]
     )
     positions.append({
@@ -1863,6 +1885,7 @@ def _stock_card(s):
 def build_html(data):
     p      = data["prices"]
     ts     = data["timestamp"]
+    updated_epoch = int(datetime.now().timestamp())
     grand  = data["grand_total"]
     n      = data["navi"]
     sl     = data["suilend"]
@@ -1931,7 +1954,8 @@ def build_html(data):
     # Stock holdings rows
     def _stock_rows():
         rows = ""
-        for s in stocks:
+        # Cash always sorts to the bottom; other stocks keep their order (stable sort)
+        for s in sorted(stocks, key=lambda x: x.get("ticker", "").upper() == "CASH"):
             is_us  = s.get("currency", "USD") == "USD"
             csym   = "$" if is_us else "฿"
             gain   = s.get("pct_chg", 0)
@@ -1941,9 +1965,9 @@ def build_html(data):
                 f'<tr>'
                 f'<td class="ts-sym">{s["ticker"]}</td>'
                 f'<td class="ts-price">{csym}{s.get("price",0):,.2f}</td>'
-                f'<td class="ts-num">{s.get("shares",0):,.2f} sh</td>'
+                f'<td class="ts-num">{s.get("shares",0):,.2f}<span class="stock-sh"> sh</span></td>'
                 f'<td class="ts-usd">{fmt(s.get("market_value",0))}'
-                f'<span style="font-size:.6rem;color:{gc};margin-left:4px">{gsign}{gain:.1f}%</span>'
+                f'<span class="stock-gain" style="color:{gc}">{gsign}{gain:.1f}%</span>'
                 f'</td></tr>'
             )
         return rows
@@ -2180,8 +2204,8 @@ def build_html(data):
         f'<div class="stat-card"><div class="sc-lbl">Best Week</div><div class="sc-val">${best_week_earn:,.2f}<div class="sc-lbl" style="margin-top:2px">{best_week[0]}</div></div></div>'
         f'</div>'
         f'<div class="charts-row">'
-        f'<div class="chart-card priv-chart"><h3>Weekly Earnings — Main vs MM</h3><canvas id="earn-bar"></canvas></div>'
-        f'<div class="chart-card"><h3>Annualized Yield %</h3><canvas id="yield-line"></canvas></div>'
+        f'<div class="chart-card priv-chart"><h3>Weekly Earnings — Main vs MM</h3><canvas id="earn-bar" role="img" aria-label="Bar chart of weekly earnings, main account versus money market"></canvas></div>'
+        f'<div class="chart-card"><h3>Annualized Yield %</h3><canvas id="yield-line" role="img" aria-label="Line chart of annualized yield percent over time"></canvas></div>'
         f'</div>'
         f'<div class="ts-card">'
         f'<div class="ts-head" style="margin-bottom:14px">Cashflow — Combined 2025 &amp; 2026 Weekly Breakdown</div>'
@@ -2218,8 +2242,8 @@ def build_html(data):
         f"  options: {{\n"
         f"    plugins: {{ legend: {{ labels: {{ color: '#94a3b8', font: {{ size: 11 }} }} }} }},\n"
         f"    scales: {{\n"
-        f"      x: {{ stacked: true, grid: {{ display: false }}, ticks: {{ color: '#475569', font: {{ size: 9 }}, maxRotation: 45 }} }},\n"
-        f"      y: {{ stacked: true, grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#64748b', callback: v => '$' + v }} }}\n"
+        f"      x: {{ stacked: true, grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 9 }}, maxRotation: 45 }} }},\n"
+        f"      y: {{ stacked: true, grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#94a3b8', callback: v => '$' + v }} }}\n"
         f"    }}\n"
         f"  }}\n"
         f"}});\n\n"
@@ -2235,8 +2259,8 @@ def build_html(data):
         f"  options: {{\n"
         f"    plugins: {{ legend: {{ display: false }} }},\n"
         f"    scales: {{\n"
-        f"      x: {{ grid: {{ display: false }}, ticks: {{ color: '#475569', font: {{ size: 9 }}, maxRotation: 45 }} }},\n"
-        f"      y: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#64748b', callback: v => v + '%' }} }}\n"
+        f"      x: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 9 }}, maxRotation: 45 }} }},\n"
+        f"      y: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#94a3b8', callback: v => v + '%' }} }}\n"
         f"    }}\n"
         f"  }}\n"
         f"}});\n\n"
@@ -2267,7 +2291,7 @@ def build_html(data):
             '<button class="add-stock-btn" onclick="openAddStock()">+ Add Stock</button>'
             '</div><div class="card-grid">'
         )
-        for s in stocks:
+        for s in sorted(stocks, key=lambda x: x.get("ticker", "").upper() == "CASH"):
             page2_html += _stock_card(s)
         page2_html += '</div>'
     else:
@@ -2292,7 +2316,7 @@ def build_html(data):
 :root{
   --bg:#0d111b;--surface:#18222b;--surface2:#1e2933;--surface3:#24303e;
   --border:#ffffff0d;--border2:#ffffff18;
-  --text:#e8eaf0;--text2:#8892a4;--text3:#4e5a6e;
+  --text:#e8eaf0;--text2:#8892a4;--text3:#6b778c;
   --accent:#4da2ff;--accent2:#6fbcf0;--accent-glow:#4da2ff33;
   --green:#10b981;--red:#f87171;--orange:#f97316;--yellow:#f59e0b;
   --blue:#3b82f6;--purple:#8b5cf6;
@@ -2311,11 +2335,15 @@ body{background:radial-gradient(ellipse 1000px 700px at 50% -10%,#9945ff33,trans
 .nav-brand{font-size:1.8rem;font-weight:800;color:var(--text);white-space:nowrap;letter-spacing:.04em;text-transform:uppercase;display:flex;align-items:center;gap:8px;font-family:var(--font-display);cursor:pointer;transition:opacity .15s}
 .nav-brand:hover{opacity:.82}
 .page-menu{display:flex;gap:4px;flex-wrap:wrap}
-.page-menu-item{padding:5px 12px;border-radius:8px;font-size:.8rem;font-weight:500;color:var(--text2);cursor:pointer;transition:background .12s,color .12s;white-space:nowrap}
+.page-menu-item{appearance:none;-webkit-appearance:none;background:none;border:none;font-family:inherit;padding:5px 12px;border-radius:8px;font-size:.8rem;font-weight:500;color:var(--text2);cursor:pointer;transition:background .12s,color .12s;white-space:nowrap}
 .page-menu-item:hover{background:var(--surface2);color:var(--text)}
 .page-menu-item.active{background:var(--surface2);color:var(--accent);font-weight:600}
+.page-menu-item:focus-visible,.nav-refresh-btn:focus-visible,.nav-brand:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .nav-right{display:flex;align-items:center;gap:16px}
 .nav-ts{font-size:.72rem;color:var(--text2)}
+.nav-ts.ts-aging{color:#f59e0b}
+.nav-ts.ts-stale{color:#f87171;font-weight:600}
+.nav-ts .ts-rel{opacity:.85}
 .nav-refresh-btn{padding:7px 12px;border-radius:8px;border:1px solid var(--border2);background:transparent;color:var(--text2);font-size:1rem;line-height:1;cursor:pointer;transition:all .18s;font-family:inherit;display:inline-flex}
 .nav-refresh-btn:hover:not(:disabled){background:var(--surface3);color:var(--text);border-color:var(--border2)}
 .nav-refresh-btn:disabled{opacity:.7;cursor:not-allowed}
@@ -2361,7 +2389,7 @@ body.priv-on .add-stock-btn{pointer-events:none;opacity:.35;cursor:not-allowed}
 .stat-card{background:var(--surface);border-radius:14px;padding:20px 22px;border:1px solid var(--border);position:relative;overflow:hidden;transition:border-color .18s}
 .stat-card::after{content:'';position:absolute;inset:0;border-radius:14px;background:linear-gradient(135deg,#ffffff04 0%,transparent 60%);pointer-events:none}
 .stat-card:hover{border-color:var(--border2)}
-.sc-lbl{font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-weight:500}
+.sc-lbl{font-size:.66rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
 .sc-val{font-size:1.3rem;font-weight:800;color:var(--text);margin-top:7px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;font-family:var(--font-display)}
 .sc-val.debt{color:var(--red)}
 
@@ -2372,6 +2400,15 @@ body.priv-on .add-stock-btn{pointer-events:none;opacity:.35;cursor:not-allowed}
 .chart-tab:hover:not(.active){border-color:var(--border2);color:var(--text2)}
 .chart-tab.active{background:var(--accent-glow);border-color:var(--accent);color:var(--accent2)}
 .chart-pane{display:none}.chart-pane.active{display:block}
+.hist-legend{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.hl-item{display:inline-flex;align-items:center;gap:8px;font-size:.76rem;font-weight:600;letter-spacing:.01em;color:var(--text2);cursor:pointer;user-select:none;padding:6px 13px;border-radius:999px;border:1px solid var(--border2);background:var(--surface2);transition:background .16s,border-color .16s,color .16s,opacity .16s}
+.hl-item:hover{border-color:var(--c)}
+.hl-item input{position:absolute;opacity:0;pointer-events:none;width:0;height:0}
+.hl-dot{width:11px;height:11px;border-radius:50%;border:2px solid var(--c);background:var(--c);box-shadow:0 0 7px -1px var(--c);transition:all .16s;flex:none}
+.hl-item:has(input:checked){color:var(--text);border-color:color-mix(in srgb,var(--c) 50%,transparent);background:color-mix(in srgb,var(--c) 14%,var(--surface2))}
+.hl-item:has(input:not(:checked)){opacity:.5}
+.hl-item:has(input:not(:checked)) .hl-dot{background:transparent;box-shadow:none}
+.hl-item:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
 
 /* ── Token summary ── */
 .ts-card{background:var(--surface);border-radius:16px;padding:22px 24px;margin-bottom:24px;border:1px solid var(--border)}
@@ -2496,22 +2533,198 @@ body.priv-on .add-stock-btn{pointer-events:none;opacity:.35;cursor:not-allowed}
 .cat-row{margin-bottom:14px}.cat-info{display:flex;justify-content:space-between;margin-bottom:5px}
 .cat-lbl{font-size:.82rem;color:var(--text2)}.cat-val{font-size:.82rem;font-weight:600;color:var(--text);font-family:monospace}
 .cat-bar{height:5px;border-radius:3px;background:#ffffff0a;overflow:hidden}.cat-fill{height:100%;border-radius:3px;transition:width .4s}
+
+/* ── Overview / Agents nested sections ── */
+.overview-subnav,.agent-subnav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px;padding:7px;background:var(--surface);border:1px solid var(--border);border-radius:16px;width:max-content;max-width:100%}
+.overview-subtab,.agent-subtab{appearance:none;-webkit-appearance:none;border:none;background:transparent;color:var(--text2);font-family:inherit;font-size:.82rem;font-weight:650;padding:8px 14px;border-radius:11px;cursor:pointer;transition:background .15s,color .15s,box-shadow .15s;white-space:nowrap}
+.overview-subtab:hover,.agent-subtab:hover{background:var(--surface2);color:var(--text)}
+.overview-subtab.active,.agent-subtab.active{background:linear-gradient(135deg,#4da2ff22,#bc7def22);color:var(--accent);box-shadow:inset 0 0 0 1px var(--border2)}
+.overview-panel,.agent-panel{display:none}
+.overview-panel.active,.agent-panel.active{display:block}
+.agent-graph-img{display:block;width:100%;height:auto;border-radius:16px;border:1px solid var(--border);background:var(--surface2);margin-top:14px}
+.bt-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px;margin:14px 0 14px}
+.bt-field{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:11px 12px}
+.bt-field label{display:block;font-size:.62rem;text-transform:uppercase;letter-spacing:.055em;color:var(--text3);margin-bottom:7px;font-weight:700}
+.bt-field input,.bt-field select{width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:9px;color:var(--text);padding:8px 9px;font-family:'SF Mono',ui-monospace,monospace;font-size:.82rem;outline:none}
+.bt-field input:focus,.bt-field select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-glow)}
+.bt-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin:10px 0 14px}
+.bt-metric{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:11px 12px}
+.bt-metric span:first-child{display:block;font-size:.6rem;text-transform:uppercase;letter-spacing:.055em;color:var(--text3);margin-bottom:5px}
+.bt-metric span:last-child{font-size:.9rem;color:var(--text);font-weight:750;font-family:'SF Mono',ui-monospace,monospace}
+.bt-chart-wrap{height:420px;background:var(--surface2);border:1px solid var(--border);border-radius:16px;padding:14px;margin-top:12px}
+.bt-toggles{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
+.bt-toggle{display:inline-flex;align-items:center;gap:7px;background:var(--surface2);border:1px solid var(--border);border-radius:999px;color:var(--text2);font-size:.72rem;padding:7px 10px;cursor:pointer;user-select:none}
+.bt-toggle input{accent-color:#4da2ff}
+
+/* ── Phone fit / safe-area polish ── */
+html{width:100%;max-width:100%;overflow-x:hidden}
+body{width:100%;max-width:100%;overflow-x:hidden}
+.charts-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:24px;margin-bottom:24px}
+.chart-card h3,.ts-card h3{font-size:1.05rem;line-height:1.25;margin-bottom:12px;color:var(--text);letter-spacing:-.02em}
+.chart-card canvas{display:block;max-width:100%}
+@media(max-width:700px){
+  body{background-size:auto;background-position:center top,0 100%,100% 100%}
+  .top-nav{width:100%;max-width:100%;padding:calc(18px + env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) 10px max(16px,env(safe-area-inset-left,0px));gap:14px;display:block}
+  .nav-left{display:block;width:100%}
+  .nav-brand{font-size:clamp(1.72rem,7.2vw,2.05rem);line-height:1.05;margin-bottom:18px;white-space:normal;letter-spacing:.035em}
+  .page-menu{display:grid;grid-template-columns:repeat(3,max-content);justify-content:start;column-gap:7px;row-gap:10px;width:100%}
+  .page-menu-item{font-size:.86rem;padding:6px 12px;border-radius:9px}
+  .nav-right{width:100%;justify-content:flex-start;gap:16px;margin-top:22px}
+  .nav-ts{font-size:.76rem;min-width:112px}
+  .nav-refresh-btn{width:44px;height:40px;align-items:center;justify-content:center;border-radius:11px;padding:0}
+  .page{width:100%;max-width:100%;padding:28px max(16px,env(safe-area-inset-right,0px)) 44px max(16px,env(safe-area-inset-left,0px));margin:0}
+  .stats-grid{grid-template-columns:1fr;gap:16px;margin-bottom:34px}
+  .stat-card{width:100%;min-height:118px;border-radius:16px;padding:24px 28px;display:flex;flex-direction:column;justify-content:center}
+  .sc-lbl{font-size:.73rem;letter-spacing:.1em}
+  .sc-val{font-size:1.52rem;margin-top:9px}
+  .charts-row{grid-template-columns:1fr;gap:24px;margin-bottom:28px;width:100%}
+  .chart-card,.ts-card,.risk-card,.alloc-card{width:100%;border-radius:16px;padding:22px 24px;margin-bottom:24px}
+  .chart-card h3{font-size:1.38rem;line-height:1.18;margin-bottom:14px;letter-spacing:-.04em}
+  .chart-card>canvas{width:100%!important;height:250px!important}
+  #earn-bar{height:260px!important}
+  .chart-tabs{overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+  .chart-tabs::-webkit-scrollbar{display:none}
+  .ts-card{overflow-x:hidden}
+  .ts-sections{gap:30px}
+  .ts-table{width:100%;min-width:0;table-layout:fixed;font-size:clamp(.62rem,2.25vw,.72rem)}
+  .ts-table th{font-size:clamp(.48rem,1.8vw,.56rem);letter-spacing:.035em;padding-bottom:6px}
+  .ts-table td{padding:6px 0;vertical-align:middle}
+  .ts-sym{width:18%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ts-price{width:25%;font-size:clamp(.58rem,2.15vw,.68rem)}
+  .ts-num{width:28%;font-size:clamp(.58rem,2.15vw,.68rem)}
+  .ts-usd{width:29%;font-size:clamp(.58rem,2.15vw,.68rem)}
+  .ts-total-lbl{font-size:.58rem}
+  .ts-total-val{font-size:.78rem}
+  .cashflow-panel .ts-table th:nth-child(2),
+  .cashflow-panel .ts-table td:nth-child(2),
+  .cashflow-panel .ts-table th:nth-child(3),
+  .cashflow-panel .ts-table td:nth-child(3){display:none}
+  .cashflow-panel .ts-table{font-size:clamp(.58rem,2.05vw,.68rem)}
+  .cashflow-panel .ts-table th{font-size:clamp(.44rem,1.62vw,.52rem);line-height:1.15}
+  .overview-subnav,.agent-subnav{width:100%;display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:18px}
+  .overview-subtab,.agent-subtab{font-size:.78rem;padding:8px 6px}
+  .bt-controls{grid-template-columns:repeat(2,1fr)}
+  .bt-chart-wrap{height:360px;padding:10px}
+  .card-grid{grid-template-columns:1fr;gap:14px}
+  .pos-card{width:100%;border-radius:16px;padding:20px 22px}
+  .modal-ov{padding:max(12px,env(safe-area-inset-top,0px)) max(12px,env(safe-area-inset-right,0px)) max(12px,env(safe-area-inset-bottom,0px)) max(12px,env(safe-area-inset-left,0px))}
+}
+@media(max-width:380px){
+  .top-nav{padding-left:12px;padding-right:12px}
+  .page{padding-left:12px;padding-right:12px}
+  .page-menu{grid-template-columns:repeat(3,max-content)}
+  .stat-card,.chart-card,.ts-card,.risk-card,.alloc-card{padding-left:18px;padding-right:18px}
+  .chart-card h3{font-size:1.18rem}
+}
 """
 
     # ── Static JS
     JS = """
-function showPage(name) {
+const PAGES = ['market', 'overview', 'agents'];
+const OVERVIEW_TABS = ['summary', 'cashflow', 'positions'];
+const AGENT_TABS = ['overview', 'lp', 'usdc'];
+function selectAgentTab(tab, pushHash = true) {
+  if (!AGENT_TABS.includes(tab)) tab = 'overview';
+  document.querySelectorAll('.agent-panel').forEach(p => p.classList.remove('active'));
+  const panel = document.getElementById('agents-' + tab);
+  if (panel) panel.classList.add('active');
+  document.querySelectorAll('.agent-subtab').forEach(b => {
+    const on = b.dataset.agentTab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  if (pushHash) {
+    const next = tab === 'overview' ? 'agents' : 'agents-' + tab;
+    if (location.hash.replace(/^#/, '') !== next) location.hash = next;
+  }
+  if (tab === 'lp') setTimeout(renderLpBacktest, 60);
+}
+function selectOverviewTab(tab, pushHash = true) {
+  if (!OVERVIEW_TABS.includes(tab)) tab = 'summary';
+  document.querySelectorAll('.overview-panel').forEach(p => p.classList.remove('active'));
+  const panel = document.getElementById('overview-' + tab);
+  if (panel) panel.classList.add('active');
+  document.querySelectorAll('.overview-subtab').forEach(b => {
+    const on = b.dataset.overviewTab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  if (pushHash) {
+    const next = tab === 'summary' ? 'overview' : 'overview-' + tab;
+    if (location.hash.replace(/^#/, '') !== next) location.hash = next;
+  }
+  setTimeout(() => window.dispatchEvent(new Event('resize')), 80);
+}
+function showPage(name, overviewTab, agentTab) {
+  if (name === 'interest') { name = 'overview'; overviewTab = 'cashflow'; }
+  if (name === 'positions') { name = 'overview'; overviewTab = 'positions'; }
+  if (name === 'agents-backtest') { name = 'agents'; agentTab = 'lp'; }
+  if (name === 'agents-lp') { name = 'agents'; agentTab = 'lp'; }
+  if (name === 'agents-usdc') { name = 'agents'; agentTab = 'usdc'; }
+  if (!PAGES.includes(name)) name = 'market';
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.getElementById('page-' + name).classList.add('active');
+  const pg = document.getElementById('page-' + name);
+  if (pg) pg.classList.add('active');
+  document.querySelectorAll('.page-menu-item').forEach(i => {
+    const on = i.dataset.page === name;
+    i.classList.toggle('active', on);
+    i.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  if (name === 'overview') selectOverviewTab(overviewTab || 'summary', false);
+  if (name === 'agents') selectAgentTab(agentTab || 'overview', false);
 }
-function selectPage(name, label, el) {
-  document.querySelectorAll('.page-menu-item').forEach(i => i.classList.remove('active'));
-  el.classList.add('active');
-  showPage(name);
+// Tabs drive the URL hash so views are bookmarkable/shareable; hashchange does the work.
+function selectPage(name) {
+  if (location.hash.replace(/^#/, '') === name) showPage(name);
+  else location.hash = name;
 }
-function goToMarket() {
-  selectPage('market', 'Market', document.getElementById('page-menu-market'));
+function goToMarket() { selectPage('market'); }
+function _routeFromHash() {
+  let name = (location.hash || '').replace(/^#/, '') || 'market';
+  let overviewTab = 'summary';
+  let agentTab = 'overview';
+  if (name === 'overview-cashflow') { name = 'overview'; overviewTab = 'cashflow'; }
+  if (name === 'overview-positions') { name = 'overview'; overviewTab = 'positions'; }
+  if (name === 'agents-backtest') { name = 'agents'; agentTab = 'lp'; }
+  if (name === 'agents-lp') { name = 'agents'; agentTab = 'lp'; }
+  if (name === 'agents-usdc') { name = 'agents'; agentTab = 'usdc'; }
+  if (name === 'interest') { name = 'overview'; overviewTab = 'cashflow'; }
+  if (name === 'positions') { name = 'overview'; overviewTab = 'positions'; }
+  showPage(name, overviewTab, agentTab);
 }
+window.addEventListener('hashchange', _routeFromHash);
+window.addEventListener('DOMContentLoaded', _routeFromHash);
+
+// Show/hide a line on the history chart via the checkboxes above it.
+function toggleHistLine(idx, on) {
+  if (!window.histChart) return;
+  histChart.setDatasetVisibility(idx, on);
+  histChart.update();
+}
+
+// Sanitize all rendered markdown (briefs are auto-synced from an external source).
+function mdSafe(s) {
+  const html = marked.parse(s || '');
+  return (window.DOMPurify ? DOMPurify.sanitize(html) : html);
+}
+
+// Color the "Updated" stamp by age and show a relative "x ago" hint.
+(function staleCheck() {
+  const el = document.getElementById('nav-ts');
+  if (!el) return;
+  const upd = parseInt(el.dataset.updated || '0', 10) * 1000;
+  if (!upd) return;
+  const ageH = (Date.now() - upd) / 3600000;
+  el.classList.add(ageH >= 24 ? 'ts-stale' : ageH >= 6 ? 'ts-aging' : 'ts-fresh');
+  const rel = ageH < 1 ? Math.max(1, Math.round(ageH * 60)) + 'm ago'
+            : ageH < 24 ? Math.round(ageH) + 'h ago'
+            : Math.round(ageH / 24) + 'd ago';
+  el.title = 'Last refreshed ' + rel;
+  const badge = document.createElement('span');
+  badge.className = 'ts-rel';
+  badge.textContent = ' ' + rel;
+  el.appendChild(badge);
+})();
 
 const EYE_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0112 19c-7 0-11-7-11-7a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 7 11 7a18.5 18.5 0 01-2.16 3.19"/><path d="M14.12 14.12a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
@@ -2767,7 +2980,7 @@ function mbParse(content) {
 function mbFormatBody(content, noteId) {
   const { items, summaryText } = mbParse(content);
 
-  if (!items.length) return `<div class="mb-note-body">${marked.parse(content || '')}</div>`;
+  if (!items.length) return `<div class="mb-note-body">${mdSafe(content)}</div>`;
 
   const order = [];
   const groups = {};
@@ -2776,7 +2989,7 @@ function mbFormatBody(content, noteId) {
     groups[it.category].push(it.text);
   });
 
-  const summaryHtml = summaryText ? `<div class="mb-note-body mb-note-summary">${marked.parse(summaryText)}</div>` : '';
+  const summaryHtml = summaryText ? `<div class="mb-note-body mb-note-summary">${mdSafe(summaryText)}</div>` : '';
 
   const gridId = 'mb-grid-' + noteId;
   const filterHtml = order.length > 1 ? `<div class="mb-category-filter">
@@ -2787,7 +3000,7 @@ function mbFormatBody(content, noteId) {
   const categoriesHtml = `<div class="mb-category-grid" id="${gridId}">${order.map(cat => `
     <div class="mb-category-card" data-category="${cat}">
       <div class="mb-category-head">${cat}</div>
-      ${groups[cat].map(t => `<div class="mb-note-body mb-cat-item">${marked.parse(t)}</div>`).join('')}
+      ${groups[cat].map(t => `<div class="mb-note-body mb-cat-item">${mdSafe(t)}</div>`).join('')}
     </div>
   `).join('')}</div>`;
 
@@ -2815,7 +3028,7 @@ function mbFilterCategory(btn, gridId, cat) {
   });
   grid.innerHTML = `<div class="mb-category-card" data-category="${cat}">
     <div class="mb-category-head">${cat}</div>
-    ${dated.map(d => `<div class="mb-note-body mb-cat-item">${marked.parse(d.text)}<div class="mb-cat-date">${d.date}</div></div>`).join('')}
+    ${dated.map(d => `<div class="mb-note-body mb-cat-item">${mdSafe(d.text)}<div class="mb-cat-date">${d.date}</div></div>`).join('')}
   </div>`;
 }
 
@@ -2864,29 +3077,30 @@ async function mbDelete(date) {
     hist_total  = [h["total"]  for h in history]
     history_js = (
         f"const histCtx = document.getElementById('history-chart').getContext('2d');\n"
-        f"new Chart(histCtx, {{\n"
+        f"const histChart = new Chart(histCtx, {{\n"
         f"  type: 'line',\n"
         f"  data: {{\n"
         f"    labels: {json.dumps(hist_dates)},\n"
         f"    datasets: [\n"
-        f"      {{ label: 'Total', data: {json.dumps(hist_total)}, borderColor: '#f1f5f9', backgroundColor: '#f1f5f908', borderWidth: 2, pointRadius: 2, tension: 0.3, fill: false }},\n"
-        f"      {{ label: 'Crypto', data: {json.dumps(hist_crypto)}, borderColor: '#4da2ff', backgroundColor: '#4da2ff08', borderWidth: 1.5, pointRadius: 2, tension: 0.3, fill: false }},\n"
-        f"      {{ label: 'Stocks', data: {json.dumps(hist_stock)}, borderColor: '#6366f1', backgroundColor: '#6366f108', borderWidth: 1.5, pointRadius: 2, tension: 0.3, fill: false }}\n"
+        f"      {{ label: 'Total', data: {json.dumps(hist_total)}, borderColor: '#f1f5f9', backgroundColor: '#f1f5f908', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }},\n"
+        f"      {{ label: 'Crypto', data: {json.dumps(hist_crypto)}, borderColor: '#4da2ff', backgroundColor: '#4da2ff08', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }},\n"
+        f"      {{ label: 'Stocks', data: {json.dumps(hist_stock)}, borderColor: '#6366f1', backgroundColor: '#6366f108', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }}\n"
         f"    ]\n"
         f"  }},\n"
         f"  options: {{\n"
         f"    responsive: true,\n"
         f"    interaction: {{ mode: 'index', intersect: false }},\n"
         f"    plugins: {{\n"
-        f"      legend: {{ labels: {{ color: '#94a3b8', font: {{ size: 11 }}, boxWidth: 12 }} }},\n"
+        f"      legend: {{ display: false }},\n"
         f"      tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:0,maximumFractionDigits:0}}) }} }}\n"
         f"    }},\n"
         f"    scales: {{\n"
-        f"      x: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#475569', font: {{ size: 10 }}, maxTicksLimit: 10 }} }},\n"
-        f"      y: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#64748b', callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}\n"
+        f"      x: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#94a3b8', font: {{ size: 10 }}, maxTicksLimit: 10 }} }},\n"
+        f"      y: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#94a3b8', callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}\n"
         f"    }}\n"
         f"  }}\n"
         f"}});\n"
+        f"window.histChart = histChart;\n"
     )
     # Category chart data
     cat_labels = []
@@ -2929,6 +3143,62 @@ async function mbDelete(date) {
         f"}});\n"
     )
 
+    # ── By-asset chart data: Crypto / Stock / Stable (cash + stablecoins)
+    _STABLE_SYMS = {"USDC", "USDT", "USDSUI", "FDUSD", "BUCK", "AUSD", "MUSD",
+                    "USDE", "SUI_USDE", "USDY", "DAI", "WUSDC", "USDC.E"}
+    crypto_usd = sum(v["usd"] for s, v in tok_assets.items() if s.upper() not in _STABLE_SYMS)
+    stable_cr  = sum(v["usd"] for s, v in tok_assets.items() if s.upper() in _STABLE_SYMS)
+    cash_usd   = sum(s.get("market_value", 0) for s in stocks if s["ticker"].upper() == "CASH")
+    stock_usd  = sum(s.get("market_value", 0) for s in stocks if s["ticker"].upper() != "CASH")
+    _asset_data = [
+        ("Crypto",       crypto_usd,             "#34d399"),
+        ("Stock",        stock_usd,              "#8b5cf6"),
+        ("Stable asset", stable_cr + cash_usd,   "#38bdf8"),
+    ]
+    _ad = [(l, round(v, 2), c) for l, v, c in _asset_data if v > 0]
+    asset_labels  = [x[0] for x in _ad]
+    asset_values  = [x[1] for x in _ad]
+    asset_colors  = [x[2] for x in _ad]
+    asset_js = (
+        f"const assetCtx = document.getElementById('asset-chart').getContext('2d');\n"
+        f"const _assetData = {json.dumps(asset_values)};\n"
+        f"const _assetTotal = _assetData.reduce((a,b)=>a+b,0) || 1;\n"
+        f"new Chart(assetCtx, {{\n"
+        f"  type: 'doughnut',\n"
+        f"  data: {{ labels: {json.dumps(asset_labels)}, datasets: [{{ data: _assetData, backgroundColor: {json.dumps(asset_colors)}, borderColor: '#0f172a', borderWidth: 2 }}] }},\n"
+        f"  options: {{\n"
+        f"    maintainAspectRatio: false, cutout: '62%',\n"
+        f"    plugins: {{\n"
+        f"      legend: {{ position: 'bottom', labels: {{ color: '#94a3b8', font: {{ size: 12 }}, padding: 16, usePointStyle: true }} }},\n"
+        f"      tooltip: {{ callbacks: {{ label: ctx => ' ' + ctx.label + ': $' + ctx.parsed.toLocaleString(undefined,{{maximumFractionDigits:0}}) + '  (' + (ctx.parsed/_assetTotal*100).toFixed(1) + '%)' }} }}\n"
+        f"    }}\n"
+        f"  }}\n"
+        f"}});\n"
+    )
+
+    # ── Second By-asset donut: Crypto vs Stock (uses the Portfolio History totals)
+    _cs_data = [("Crypto", crypto_total, "#34d399"), ("Stock", stocks_total, "#8b5cf6")]
+    _cs = [(l, round(v, 2), c) for l, v, c in _cs_data if v > 0]
+    cs_labels = [x[0] for x in _cs]
+    cs_values = [x[1] for x in _cs]
+    cs_colors = [x[2] for x in _cs]
+    assetcs_js = (
+        f"const assetCsCtx = document.getElementById('asset-cs-chart').getContext('2d');\n"
+        f"const _csData = {json.dumps(cs_values)};\n"
+        f"const _csTotal = _csData.reduce((a,b)=>a+b,0) || 1;\n"
+        f"new Chart(assetCsCtx, {{\n"
+        f"  type: 'doughnut',\n"
+        f"  data: {{ labels: {json.dumps(cs_labels)}, datasets: [{{ data: _csData, backgroundColor: {json.dumps(cs_colors)}, borderColor: '#0f172a', borderWidth: 2 }}] }},\n"
+        f"  options: {{\n"
+        f"    maintainAspectRatio: false, cutout: '62%',\n"
+        f"    plugins: {{\n"
+        f"      legend: {{ position: 'bottom', labels: {{ color: '#94a3b8', font: {{ size: 12 }}, padding: 16, usePointStyle: true }} }},\n"
+        f"      tooltip: {{ callbacks: {{ label: ctx => ' ' + ctx.label + ': $' + ctx.parsed.toLocaleString(undefined,{{maximumFractionDigits:0}}) + '  (' + (ctx.parsed/_csTotal*100).toFixed(1) + '%)' }} }}\n"
+        f"    }}\n"
+        f"  }}\n"
+        f"}});\n"
+    )
+
     chart_switch_js = """
 function switchChart(tab) {
   document.querySelectorAll('.chart-tab').forEach(b => b.classList.remove('active'));
@@ -2938,7 +3208,7 @@ function switchChart(tab) {
 }
 """
 
-    chart_js += history_js + cat_js + interest_js + chart_switch_js
+    chart_js += history_js + cat_js + asset_js + assetcs_js + interest_js + chart_switch_js
 
     bar_h = max(320, len(proto_labels) * 34)
     cat_h = max(160, len(cat_labels) * 52)
@@ -2949,10 +3219,28 @@ function switchChart(tab) {
         '<button class="chart-tab active" data-tab="history" onclick="switchChart(\'history\')">Portfolio History</button>'
         '<button class="chart-tab" data-tab="protocol" onclick="switchChart(\'protocol\')">By Protocol</button>'
         '<button class="chart-tab" data-tab="category" onclick="switchChart(\'category\')">By Category</button>'
+        '<button class="chart-tab" data-tab="asset" onclick="switchChart(\'asset\')">By Asset</button>'
         '</div>'
-        '<div id="pane-history" class="chart-pane active"><canvas id="history-chart"></canvas></div>'
-        f'<div id="pane-protocol" class="chart-pane"><div style="height:{bar_h}px"><canvas id="bar"></canvas></div></div>'
-        f'<div id="pane-category" class="chart-pane"><div style="height:{cat_h}px"><canvas id="cat-chart"></canvas></div></div>'
+        '<div id="pane-history" class="chart-pane active">'
+        '<div class="hist-legend">'
+        '<label class="hl-item" style="--c:#f1f5f9"><input type="checkbox" checked onchange="toggleHistLine(0,this.checked)"><span class="hl-dot"></span>Total</label>'
+        '<label class="hl-item" style="--c:#4da2ff"><input type="checkbox" checked onchange="toggleHistLine(1,this.checked)"><span class="hl-dot"></span>Crypto</label>'
+        '<label class="hl-item" style="--c:#6366f1"><input type="checkbox" checked onchange="toggleHistLine(2,this.checked)"><span class="hl-dot"></span>Stocks</label>'
+        '</div>'
+        '<canvas id="history-chart" role="img" aria-label="Line chart of portfolio value over time: total, crypto and stocks"></canvas></div>'
+        f'<div id="pane-protocol" class="chart-pane"><div style="height:{bar_h}px"><canvas id="bar" role="img" aria-label="Bar chart of value by protocol"></canvas></div></div>'
+        f'<div id="pane-category" class="chart-pane"><div style="height:{cat_h}px"><canvas id="cat-chart" role="img" aria-label="Bar chart of value by category"></canvas></div></div>'
+        '<div id="pane-asset" class="chart-pane">'
+        '<div style="display:flex;flex-wrap:wrap;gap:24px;justify-content:center">'
+        '<div style="flex:1;min-width:240px;max-width:430px">'
+        '<div style="text-align:center;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:#94a3b8;margin-bottom:8px">Crypto / Stock / Stable</div>'
+        '<div style="height:320px"><canvas id="asset-chart" role="img" aria-label="Doughnut chart of allocation by asset type: crypto, stock, stable asset"></canvas></div>'
+        '</div>'
+        '<div style="flex:1;min-width:240px;max-width:430px">'
+        '<div style="text-align:center;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:#94a3b8;margin-bottom:8px">Crypto vs Stock</div>'
+        '<div style="height:320px"><canvas id="asset-cs-chart" role="img" aria-label="Doughnut chart of crypto versus stock allocation"></canvas></div>'
+        '</div>'
+        '</div></div>'
         '</div>'
     )
 
@@ -3011,8 +3299,175 @@ function switchChart(tab) {
 </div>
 """
 
+    # ── Agent Team page (static diagram of the Kive sub-agent team)
+    agent_team_page_html = """
+<style>
+.at-intro{color:var(--text2);font-size:.95rem;line-height:1.75;margin-bottom:22px;max-width:780px}
+.at-intro strong{color:var(--text)}
+.at-card-lg{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:22px 24px;margin-bottom:24px}
+.at-head{font-size:.65rem;text-transform:uppercase;letter-spacing:.09em;font-weight:700;color:var(--text3);margin-bottom:18px}
+.at-svg-wrap{overflow-x:auto;padding-bottom:6px}
+.at-svg{width:100%;min-width:780px;height:auto;display:block}
+.at-node{cursor:default}
+.at-box{transition:filter .15s}
+.at-node:hover .at-box{filter:brightness(1.3)}
+.at-name{font-size:15px;font-weight:700;fill:var(--text)}
+.at-role{font-size:10.5px;fill:var(--text3)}
+.at-kname{font-size:19px;font-weight:800;fill:#ecd9ff}
+.at-krole{font-size:11px;fill:#caa9e6}
+.at-yname{font-size:13px;font-weight:700;fill:#c9d2de}
+.at-edge{stroke:#5b6472;stroke-width:2;fill:none}
+.at-dash{stroke:#4b5563;stroke-width:1.5;stroke-dasharray:4 4;fill:none}
+.at-elabel{font-size:11px;font-weight:700;fill:#9aa3b2;font-family:'SF Mono',ui-monospace,monospace}
+.at-pill-box{fill:rgba(255,255,255,.03);stroke:#3a4250;stroke-width:1;stroke-dasharray:3 3}
+.at-pill-text{font-size:10.5px;fill:var(--text3);font-weight:600}
+.at-legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)}
+.at-leg{display:flex;align-items:center;gap:7px;font-size:.78rem;color:var(--text2)}
+.at-leg .dot{width:11px;height:11px;border-radius:3px}
+.at-flows{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:14px}
+.at-flows li{font-size:.88rem;color:var(--text2);line-height:1.6}
+.at-flows .fl-name{font-weight:700;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;font-size:.82rem}
+.at-flows .fl-chain{color:var(--text3);font-family:'SF Mono',ui-monospace,monospace;font-size:.8rem}
+.at-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(245px,1fr));gap:14px}
+.at-card{background:var(--surface2);border:1px solid var(--border);border-left:3px solid var(--c);border-radius:12px;padding:16px 18px}
+.at-card h4{margin:0;font-size:1.02rem;color:var(--text);display:flex;align-items:center;gap:8px}
+.at-card .at-role-tag{display:block;font-size:.7rem;color:var(--c);font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-top:3px}
+.at-card p{margin:9px 0 0;font-size:.85rem;color:var(--text2);line-height:1.6}
+.at-card .at-flow{font-size:.74rem;color:var(--text3);margin-top:10px;font-family:'SF Mono',ui-monospace,monospace}
+</style>
+
+<p class="at-intro"><strong>Kive</strong> is your main agent. You talk to Kive; Kive orchestrates a team of specialist sub-agents and routes each request to the right one. This page maps the team and how work flows between them.</p>
+
+<div class="at-card-lg">
+  <div class="at-head">Team Map</div>
+  <div class="at-svg-wrap">
+  <svg class="at-svg" viewBox="0 0 1090 540" role="img" aria-label="Horizontal diagram of the Kive agent team and how the agents connect">
+    <defs>
+      <marker id="at-arrow" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L7,3 L0,6 Z" fill="#5b6472"/>
+      </marker>
+    </defs>
+
+    <!-- Kive: one stem to a vertical trunk, then right-angle branches into each agent -->
+    <line class="at-edge" x1="154" y1="280" x2="200" y2="280"/>
+    <line class="at-edge" x1="200" y1="70" x2="200" y2="495"/>
+    <line class="at-edge" x1="200" y1="70" x2="240" y2="70" marker-end="url(#at-arrow)"/>
+    <line class="at-edge" x1="200" y1="185" x2="240" y2="185" marker-end="url(#at-arrow)"/>
+    <line class="at-edge" x1="200" y1="295" x2="240" y2="295" marker-end="url(#at-arrow)"/>
+    <line class="at-edge" x1="200" y1="405" x2="240" y2="405" marker-end="url(#at-arrow)"/>
+    <line class="at-edge" x1="200" y1="495" x2="240" y2="495" marker-end="url(#at-arrow)"/>
+    <!-- research chain (left to right) -->
+    <line class="at-edge" x1="358" y1="70" x2="418" y2="70" marker-end="url(#at-arrow)"/>
+    <line class="at-edge" x1="536" y1="70" x2="588" y2="70" marker-end="url(#at-arrow)"/>
+    <line class="at-edge" x1="706" y1="70" x2="758" y2="70" marker-end="url(#at-arrow)"/>
+    <!-- outputs (dashed) -->
+    <line class="at-dash" x1="876" y1="70" x2="903" y2="70" marker-end="url(#at-arrow)"/>
+    <line class="at-dash" x1="358" y1="185" x2="418" y2="185" marker-end="url(#at-arrow)"/>
+    <line class="at-dash" x1="358" y1="295" x2="418" y2="295" marker-end="url(#at-arrow)"/>
+    <!-- diary store: Diry writes (elbow), Zammy reads (elbow) -->
+    <polyline class="at-edge" points="358,405 506,405 506,426" fill="none" marker-end="url(#at-arrow)"/>
+    <polyline class="at-edge" points="506,472 506,495 362,495" fill="none" marker-end="url(#at-arrow)"/>
+    <text class="at-elabel" x="432" y="398" text-anchor="middle">writes</text>
+    <text class="at-elabel" x="438" y="489" text-anchor="middle">reads</text>
+
+    <!-- Kive -->
+    <g class="at-node"><title>Kive — your main agent / orchestrator. Routes every request to the right specialist.</title>
+      <rect class="at-box" x="26" y="252" width="128" height="56" rx="14" fill="#2a1840" stroke="#bc7def" stroke-width="2"/>
+      <text class="at-kname" x="90" y="277" text-anchor="middle">Kive</text>
+      <text class="at-krole" x="90" y="294" text-anchor="middle">Orchestrator</text></g>
+
+    <!-- research chain -->
+    <g class="at-node"><title>Ken — Research Planner. Turns a topic into a lightweight search plan (sections + keywords).</title>
+      <rect class="at-box" x="242" y="45" width="116" height="50" rx="12" fill="#0e2238" stroke="#4da2ff"/>
+      <text class="at-name" x="300" y="68" text-anchor="middle">Ken</text>
+      <text class="at-role" x="300" y="84" text-anchor="middle">Research planner</text></g>
+    <g class="at-node"><title>Glast — Web Researcher &amp; NotebookLM Curator. Researches each section of Ken's plan into a notebook.</title>
+      <rect class="at-box" x="420" y="45" width="116" height="50" rx="12" fill="#0e2238" stroke="#4da2ff"/>
+      <text class="at-name" x="478" y="68" text-anchor="middle">Glast</text>
+      <text class="at-role" x="478" y="84" text-anchor="middle">Web researcher</text></g>
+    <g class="at-node"><title>Nelly — Report Writer. Turns the notebook into a human-readable, easy report.</title>
+      <rect class="at-box" x="590" y="45" width="116" height="50" rx="12" fill="#0e2238" stroke="#4da2ff"/>
+      <text class="at-name" x="648" y="68" text-anchor="middle">Nelly</text>
+      <text class="at-role" x="648" y="84" text-anchor="middle">Report writer</text></g>
+    <g class="at-node"><title>Zeny — Report Generator &amp; Knowledge Curator. Saves the report as markdown to the Knowledge folder.</title>
+      <rect class="at-box" x="760" y="45" width="116" height="50" rx="12" fill="#0e2238" stroke="#4da2ff"/>
+      <text class="at-name" x="818" y="68" text-anchor="middle">Zeny</text>
+      <text class="at-role" x="818" y="84" text-anchor="middle">Knowledge curator</text></g>
+
+    <!-- Monday -->
+    <g class="at-node"><title>Monday — Python Script Master Reviewer. Security, vulnerability and architecture review.</title>
+      <rect class="at-box" x="242" y="160" width="116" height="50" rx="12" fill="#2e1b12" stroke="#f59e0b"/>
+      <text class="at-name" x="300" y="183" text-anchor="middle">Monday</text>
+      <text class="at-role" x="300" y="199" text-anchor="middle">Code reviewer</text></g>
+    <!-- Finn -->
+    <g class="at-node"><title>Finn — Financial News Curator. Daily Thai financial news brief, runs as a cloud routine at 9 AM.</title>
+      <rect class="at-box" x="242" y="270" width="116" height="50" rx="12" fill="#0f2a1f" stroke="#34d399"/>
+      <text class="at-name" x="300" y="293" text-anchor="middle">Finn</text>
+      <text class="at-role" x="300" y="309" text-anchor="middle">News curator</text></g>
+    <!-- Diry -->
+    <g class="at-node"><title>Diry — Diary Keeper. Writes dated entries to diary.md whenever Kive does something on your behalf.</title>
+      <rect class="at-box" x="242" y="380" width="116" height="50" rx="12" fill="#2b1320" stroke="#f472b6"/>
+      <text class="at-name" x="300" y="403" text-anchor="middle">Diry</text>
+      <text class="at-role" x="300" y="419" text-anchor="middle">Diary keeper</text></g>
+    <!-- Zammy -->
+    <g class="at-node"><title>Zammy — Diary Reflection Analyst. Reads diary.md and reflects on Problems / What I Have / Reflection.</title>
+      <rect class="at-box" x="242" y="470" width="116" height="50" rx="12" fill="#261433" stroke="#c879ef"/>
+      <text class="at-name" x="300" y="493" text-anchor="middle">Zammy</text>
+      <text class="at-role" x="300" y="509" text-anchor="middle">Diary reflector</text></g>
+
+    <!-- diary.md store (shared by Diry & Zammy) -->
+    <g class="at-node"><title>diary.md — your running log. Diry writes to it; Zammy reads from it.</title>
+      <rect class="at-box" x="441" y="428" width="130" height="44" rx="10" fill="#161b24" stroke="#7c889a" stroke-dasharray="5 4"/>
+      <text class="at-pill-text" x="506" y="455" text-anchor="middle" style="font-size:13px;fill:var(--text2);font-weight:700">&#128214; diary.md</text></g>
+
+    <!-- output pills -->
+    <g><rect class="at-pill-box" x="905" y="56" width="150" height="28" rx="14"/>
+      <text class="at-pill-text" x="980" y="74" text-anchor="middle">&#128193; Knowledge folder</text></g>
+    <g><rect class="at-pill-box" x="420" y="171" width="160" height="28" rx="14"/>
+      <text class="at-pill-text" x="500" y="189" text-anchor="middle">&#128274; Review report</text></g>
+    <g><rect class="at-pill-box" x="420" y="281" width="160" height="28" rx="14"/>
+      <text class="at-pill-text" x="500" y="299" text-anchor="middle">&#128202; Dashboard Brief</text></g>
+  </svg>
+  </div>
+  <div class="at-legend">
+    <span class="at-leg"><span class="dot" style="background:#bc7def"></span>Orchestrator</span>
+    <span class="at-leg"><span class="dot" style="background:#4da2ff"></span>Research pipeline</span>
+    <span class="at-leg"><span class="dot" style="background:#f59e0b"></span>Code review</span>
+    <span class="at-leg"><span class="dot" style="background:#34d399"></span>News</span>
+    <span class="at-leg"><span class="dot" style="background:#f472b6"></span>Diary keeper</span>
+    <span class="at-leg"><span class="dot" style="background:#c879ef"></span>Reflection</span>
+  </div>
+</div>
+
+<div class="at-card-lg">
+  <div class="at-head">Workflows</div>
+  <ul class="at-flows">
+    <li><span class="fl-name">/research</span> &nbsp;<span class="fl-chain">Ken (plan) &rarr; Glast (research) &rarr; Nelly (write) &rarr; Zeny (save)</span><br>A topic becomes a search plan, deep research, a readable report, then a saved file in the Knowledge folder.</li>
+    <li><span class="fl-name">/review-python</span> &nbsp;<span class="fl-chain">Monday &rarr; security report</span><br>A Python script gets a full security, vulnerability, and architecture review.</li>
+    <li><span class="fl-name">daily brief</span> &nbsp;<span class="fl-chain">Finn &rarr; Dashboard Market Brief</span><br>Runs itself at 9 AM (cloud routine) and publishes the Thai finance brief to this dashboard.</li>
+    <li><span class="fl-name">log</span> &nbsp;<span class="fl-chain">Diry &rarr; writes diary.md</span><br>After every action Kive does for you, Diry records a dated entry in the diary.</li>
+    <li><span class="fl-name">reflect</span> &nbsp;<span class="fl-chain">Zammy &rarr; reads diary.md</span><br>Reflects your diary into Problems, What I Have, and Reflection About Me.</li>
+  </ul>
+</div>
+
+<div class="at-card-lg">
+  <div class="at-head">The Team</div>
+  <div class="at-cards">
+    <div class="at-card" style="--c:#bc7def"><h4>Kive<span class="at-role-tag">Main orchestrator</span></h4><p>Your main agent. Talks to you and routes every request to the right specialist sub-agent.</p></div>
+    <div class="at-card" style="--c:#4da2ff"><h4>Ken<span class="at-role-tag">Research planner</span></h4><p>Turns a topic into a lightweight search plan &mdash; sections and keywords for Glast to research within.</p><div class="at-flow">/research &middot; step 1</div></div>
+    <div class="at-card" style="--c:#4da2ff"><h4>Glast<span class="at-role-tag">Web researcher</span></h4><p>Takes Ken's plan, browses trustworthy sources, and curates findings into a NotebookLM notebook &mdash; framed around your interests.</p><div class="at-flow">/research &middot; step 2</div></div>
+    <div class="at-card" style="--c:#4da2ff"><h4>Nelly<span class="at-role-tag">Report writer</span></h4><p>Reads the notebook and writes a human-readable, easy-to-understand report.</p><div class="at-flow">/research &middot; step 3</div></div>
+    <div class="at-card" style="--c:#4da2ff"><h4>Zeny<span class="at-role-tag">Knowledge curator</span></h4><p>Generates the report from NotebookLM and saves it as markdown in your Knowledge folder.</p><div class="at-flow">/research &middot; step 4</div></div>
+    <div class="at-card" style="--c:#f59e0b"><h4>Monday<span class="at-role-tag">Code reviewer</span></h4><p>Reviews a Python script for security, vulnerabilities, and architecture &mdash; returns a structured report.</p><div class="at-flow">/review-python</div></div>
+    <div class="at-card" style="--c:#34d399"><h4>Finn<span class="at-role-tag">News curator</span></h4><p>Daily Thai financial news brief from Reuters, Investing.com &amp; Cointelegraph. Runs at 9 AM as a cloud routine.</p><div class="at-flow">daily brief &rarr; dashboard</div></div>
+    <div class="at-card" style="--c:#f472b6"><h4>Diry<span class="at-role-tag">Diary keeper</span></h4><p>Writes the diary &mdash; logs a dated entry every time Kive does something on your behalf.</p><div class="at-flow">writes &rarr; diary.md</div></div>
+    <div class="at-card" style="--c:#c879ef"><h4>Zammy<span class="at-role-tag">Diary reflector</span></h4><p>Reads your diary and reflects it into Problems, What I Have, and Reflection About Me.</p><div class="at-flow">reads &larr; diary.md</div></div>
+  </div>
+</div>
+"""
+
     # ── Assemble HTML
-    page1 = (
+    overview_summary_html = (
         '<div class="stats-grid">'
         f'<div class="stat-card"><div class="sc-lbl">Gross Assets</div><div class="sc-val">{fmt(gross)}</div></div>'
         f'<div class="stat-card"><div class="sc-lbl">Total Debt</div><div class="sc-val debt">{fmt(total_debt)}</div></div>'
@@ -3022,6 +3477,17 @@ function switchChart(tab) {
         + tabbed_chart +
         token_summary_html +
         '<div class="risk-row">' + risk_cards + '</div>'
+    )
+
+    page1 = (
+        '<div class="overview-subnav" role="tablist" aria-label="Overview sections">'
+        '<button type="button" class="overview-subtab active" data-overview-tab="summary" onclick="selectOverviewTab(\'summary\')">Summary</button>'
+        '<button type="button" class="overview-subtab" data-overview-tab="cashflow" onclick="selectOverviewTab(\'cashflow\')">Cashflow</button>'
+        '<button type="button" class="overview-subtab" data-overview-tab="positions" onclick="selectOverviewTab(\'positions\')">Positions</button>'
+        '</div>'
+        '<div id="overview-summary" class="overview-panel active">' + overview_summary_html + '</div>'
+        '<div id="overview-cashflow" class="overview-panel cashflow-panel">' + page3 + '</div>'
+        '<div id="overview-positions" class="overview-panel positions-panel">' + page2_html + '</div>'
     )
 
     stock_modals = (
@@ -3091,33 +3557,326 @@ function switchChart(tab) {
         '</div>'
     )
 
+    LP_WALLET = "0xLP_WALLET_REDACTED"
+    LP_POOL   = "0x440e5e3b13b8220c5c338bb5a4291cab5c58064eaf3654c77f3e9aed5147689c"
+    graph_path = Path(__file__).parent / "assets" / "sui_vol_backtest_7d.png"
+    if graph_path.exists():
+        lp_graph_src = "data:image/png;base64," + base64.b64encode(graph_path.read_bytes()).decode("ascii")
+    else:
+        lp_graph_src = "/assets/sui_vol_backtest_7d.png"
+    data_path = Path(__file__).parent / "assets" / "sui_vol_backtest_data.json"
+    lp_backtest_data = data_path.read_text() if data_path.exists() else "[]"
+    agents_page_html = (
+        '<div style="margin-bottom:22px">'
+        '<h2 style="font-family:var(--font-display);font-size:1.6rem;letter-spacing:.03em;'
+        'text-transform:uppercase;color:var(--text);margin:0">Agentic Agents</h2>'
+        '</div>'
+        '<div class="agent-subnav" role="tablist" aria-label="Agent sections">'
+        '<button type="button" class="agent-subtab active" data-agent-tab="overview" onclick="selectAgentTab(\'overview\')">Overview</button>'
+        '<button type="button" class="agent-subtab" data-agent-tab="lp" onclick="selectAgentTab(\'lp\')">LP Agent</button>'
+        '<button type="button" class="agent-subtab" data-agent-tab="usdc" onclick="selectAgentTab(\'usdc\')">USDC Agent</button>'
+        '</div>'
+        '<div id="agents-overview" class="agent-panel active">'
+        '<div class="chart-card">'
+        '<h3 style="font-size:1.18rem;margin:0 0 14px;color:var(--text)">Agents Overview</h3>'
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">'
+        '<button type="button" onclick="selectAgentTab(\'lp\')" style="text-align:left;background:var(--surface2);border:1px solid var(--border);border-radius:14px;padding:16px;cursor:pointer;color:inherit;font-family:inherit">'
+        '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);font-weight:800;margin-bottom:7px">LP Agent</div>'
+        '<div style="font-size:1rem;font-weight:750;color:var(--text);margin-bottom:6px">Cetus CLMM liquidity manager</div>'
+        '<div style="font-size:.78rem;color:var(--text2);line-height:1.55">Auto-swaps SUI/USDSUI, opens LP range, watches SUI volatility, and rebalances when volatility crosses 0.20% per poll.</div>'
+        '</button>'
+        '<button type="button" onclick="selectAgentTab(\'usdc\')" style="text-align:left;background:var(--surface2);border:1px solid var(--border);border-radius:14px;padding:16px;cursor:pointer;color:inherit;font-family:inherit">'
+        '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;color:var(--accent);font-weight:800;margin-bottom:7px">USDC Agent</div>'
+        '<div style="font-size:1rem;font-weight:750;color:var(--text);margin-bottom:6px">Send &amp; receive USDC</div>'
+        '<div style="font-size:.78rem;color:var(--text2);line-height:1.55">Dedicated SUI wallet for native USDC transfers with dry-run mode, send cap, daily cap, and allowlist safety.</div>'
+        '</button>'
+        '</div>'
+        '</div>'
+        '</div>'
+        '<div id="agents-lp" class="agent-panel">'
+
+        '<div class="chart-card">'
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px">'
+        '<h3 style="font-size:1.18rem;margin:0;color:var(--text)">LP Agent &mdash; Cetus CLMM (SUI)</h3>'
+        '<span style="font-size:.68rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;'
+        'padding:3px 9px;border-radius:999px;background:var(--surface3);color:var(--yellow);'
+        'border:1px solid var(--border2)">Dry-run &middot; awaiting funding</span>'
+        '</div>'
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0 18px">'
+        + ''.join(
+            f'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:13px 15px">'
+            f'<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:5px">{lbl}</div>'
+            f'<div style="font-size:.95rem;font-weight:600;color:var(--text)">{val}</div></div>'
+            for lbl, val in [
+                ("Network", "SUI mainnet"),
+                ("DEX", "Cetus CLMM"),
+                ("Pair", "USDSUI / SUI"),
+                ("Range", "&plusmn;10&ndash;25% (volatility-adaptive)"),
+                ("Gas reserve", "3 SUI"),
+                ("Mode", "DRY_RUN (safe)"),
+                ("Rebalance trigger", "Vol &gt; 0.20% / poll"),
+            ]
+        )
+        + '</div>'
+        '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px">'
+        '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-bottom:12px;font-weight:700">How it works</div>'
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">'
+        + ''.join(
+            f'<div style="background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:12px 13px">'
+            f'<div style="font-size:.64rem;color:var(--accent);font-weight:800;letter-spacing:.05em;text-transform:uppercase;margin-bottom:5px">{step}</div>'
+            f'<div style="font-size:.82rem;color:var(--text);font-weight:700;margin-bottom:4px">{title}</div>'
+            f'<div style="font-size:.72rem;color:var(--text2);line-height:1.5">{body}</div></div>'
+            for step, title, body in [
+                ("01", "Read pool price", "Checks the live USDSUI/SUI Cetus pool and current wallet balance."),
+                ("02", "Keep gas safe", "Leaves 3 SUI untouched so the wallet can always pay transaction gas."),
+                ("03", "Auto-swap", "Uses deployable SUI, swaps part into USDSUI, then prepares both sides."),
+                ("04", "Open LP range", "Deposits into a concentrated liquidity band around current price."),
+                ("05", "Watch + rebalance", "Calculates SUI realized volatility; if it is above 0.20% per poll, it closes and reopens."),
+                ("06", "Risk gates", "Dry-run, capital cap, slippage cap, and daily rebalance limit protect it."),
+            ]
+        )
+        + '</div></div>'
+        '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px 16px">'
+        '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:6px">Agent wallet</div>'
+        f'<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--accent2);'
+        f'word-break:break-all;line-height:1.5">{LP_WALLET}</div>'
+        '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin:12px 0 6px">Pool</div>'
+        f'<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--text2);'
+        f'word-break:break-all;line-height:1.5">{LP_POOL}</div>'
+        '</div>'
+        '<div class="chart-card">'
+        '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:12px">'
+        '<div><h3 style="font-size:1.18rem;margin:0 0 6px;color:var(--text)">LP Backtest &mdash; Adjustable SUI Volatility Trigger</h3>'
+        '<p style="margin:0;color:var(--text2);font-size:.82rem;line-height:1.6">Change the settings by hand to see when the LP bot would rebalance. Data = recent SUI 1-minute candles.</p></div>'
+        '<span style="font-size:.68rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:4px 10px;border-radius:999px;background:var(--surface3);color:var(--yellow);border:1px solid var(--border2)">Interactive</span>'
+        '</div>'
+        '<div class="bt-controls">'
+        '<div class="bt-field"><label>Lookback</label><select id="bt-days" onchange="renderLpBacktest()"><option value="1">1 day</option><option value="3">3 days</option><option value="7" selected>7 days</option></select></div>'
+        '<div class="bt-field"><label>Vol window / polls</label><input id="bt-window" type="number" min="5" max="240" step="1" value="30" oninput="renderLpBacktest()"></div>'
+        '<div class="bt-field"><label>Threshold % / poll</label><input id="bt-threshold" type="number" min="0.01" max="2" step="0.01" value="0.20" oninput="renderLpBacktest()"></div>'
+        '<div class="bt-field"><label>Daily cap</label><input id="bt-cap" type="number" min="1" max="50" step="1" value="6" oninput="renderLpBacktest()"></div>'
+        '<div class="bt-field"><label>Min range %</label><select id="bt-min-range" onchange="renderLpBacktest()"><option value="0">0</option><option value="5">5</option><option value="10" selected>10</option><option value="15">15</option><option value="20">20</option><option value="25">25</option></select></div>'
+        '<div class="bt-field"><label>Max range %</label><select id="bt-max-range" onchange="renderLpBacktest()"><option value="5">5</option><option value="10">10</option><option value="15">15</option><option value="20">20</option><option value="25" selected>25</option><option value="30">30</option><option value="35">35</option><option value="40">40</option><option value="45">45</option><option value="50">50</option></select></div>'
+        '</div>'
+        '<div class="bt-metrics">'
+        '<div class="bt-metric"><span>Avg vol</span><span id="bt-avg">—</span></div>'
+        '<div class="bt-metric"><span>Max vol</span><span id="bt-max">—</span></div>'
+        '<div class="bt-metric"><span>Above threshold</span><span id="bt-spikes">—</span></div>'
+        '<div class="bt-metric"><span>Rebalances</span><span id="bt-rebalances">—</span></div>'
+        '<div class="bt-metric"><span>Avg range</span><span id="bt-avg-range">—</span></div>'
+        '<div class="bt-metric"><span>Latest range</span><span id="bt-latest-range">—</span></div>'
+        '<div class="bt-metric"><span>Widen / normal</span><span id="bt-actions">—</span></div>'
+        '</div>'
+        '<div class="bt-toggles">'
+        '<label class="bt-toggle"><input type="checkbox" data-bt-ds="0" checked onchange="applyLpBacktestVisibility()">Price</label>'
+        '<label class="bt-toggle"><input type="checkbox" data-bt-ds="1" checked onchange="applyLpBacktestVisibility()">Range upper</label>'
+        '<label class="bt-toggle"><input type="checkbox" data-bt-ds="2" checked onchange="applyLpBacktestVisibility()">Range lower</label>'
+        '<label class="bt-toggle"><input type="checkbox" data-bt-ds="3" onchange="applyLpBacktestVisibility()">Volatility</label>'
+        '<label class="bt-toggle"><input type="checkbox" data-bt-ds="4" checked onchange="applyLpBacktestVisibility()">Threshold</label>'
+        '<label class="bt-toggle"><input type="checkbox" data-bt-ds="5" checked onchange="applyLpBacktestVisibility()">Widen</label>'
+        '<label class="bt-toggle"><input type="checkbox" data-bt-ds="6" checked onchange="applyLpBacktestVisibility()">Normalize</label>'
+        '<button type="button" class="bt-toggle" onclick="resetLpZoom()" style="cursor:pointer;border:none">&#8634; Reset zoom</button>'
+        '</div>'
+        '<div class="bt-chart-wrap"><canvas id="lp-backtest-chart"></canvas></div>'
+        '<p style="margin:12px 0 0;color:var(--text3);font-size:.72rem;line-height:1.6">Note: this is a signal backtest, not P&amp;L. Purple band = the active LP position range. It stays fixed after deposit. Orange ▲ = volatility-triggered symmetric widen around the same center. Green ▼ = volatility-triggered symmetric normalize/shorten around the same center. If price leaves the band, it is allowed to stay out of range; no automatic recenter or price-following shift.</p>'
+        '</div>'
+        '</div>'
+        '</div>'
+
+        '<div id="agents-usdc" class="agent-panel">'
+        '<div class="chart-card">'
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px">'
+        '<h3 style="font-size:1.18rem;margin:0;color:var(--text)">USDC Agent &mdash; Send &amp; Receive (SUI)</h3>'
+        '<span style="font-size:.68rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;'
+        'padding:3px 9px;border-radius:999px;background:var(--surface3);color:var(--yellow);'
+        'border:1px solid var(--border2)">Dry-run &middot; awaiting funding</span>'
+        '</div>'
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0 18px">'
+        + ''.join(
+            f'<div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:13px 15px">'
+            f'<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:5px">{lbl}</div>'
+            f'<div style="font-size:.95rem;font-weight:600;color:var(--text)">{val}</div></div>'
+            for lbl, val in [
+                ("Network", "SUI mainnet"),
+                ("Token", "USDC (native)"),
+                ("Functions", "Send + Receive"),
+                ("Per-send cap", "10 USDC"),
+                ("Daily cap", "50 USDC"),
+                ("Mode", "DRY_RUN (safe)"),
+            ]
+        )
+        + '</div>'
+        '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px 16px">'
+        '<div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:6px">Receive address</div>'
+        '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem;color:var(--accent2);'
+        'word-break:break-all;line-height:1.5">0xUSDC_WALLET_REDACTED</div>'
+        '</div>'
+        '</div>'
+        '</div>'
+    )
+
+    lp_backtest_js = """
+const LP_BACKTEST_DATA = __LP_BACKTEST_DATA__;
+let lpBacktestChart = null;
+function _btMean(a){ return a.reduce((s,x)=>s+x,0)/(a.length||1); }
+function _btStd(a){ if(a.length<2) return null; const m=_btMean(a); const v=a.reduce((s,x)=>s+(x-m)*(x-m),0)/(a.length-1); return Math.sqrt(v); }
+function _btDayKey(ms){ return new Date(ms).toISOString().slice(0,10); }
+function _btClamp(x, lo, hi){ return Math.max(lo, Math.min(hi, x)); }
+function _btStep5(x){ return Math.round(x * 20) / 20; }
+function resetLpZoom(){
+  const canvas = document.getElementById('lp-backtest-chart');
+  const chart = canvas && window.Chart ? Chart.getChart(canvas) : lpBacktestChart;
+  if(chart && chart.resetZoom) chart.resetZoom();
+}
+function applyLpBacktestVisibility(){
+  const canvas = document.getElementById('lp-backtest-chart');
+  const chart = canvas && window.Chart ? Chart.getChart(canvas) : lpBacktestChart;
+  if(!chart) return;
+  document.querySelectorAll('[data-bt-ds]').forEach(cb => {
+    const idx = Number(cb.dataset.btDs);
+    chart.setDatasetVisibility(idx, cb.checked);
+  });
+  chart.update();
+}
+function renderLpBacktest(){
+  const canvas = document.getElementById('lp-backtest-chart');
+  if(!canvas || !window.Chart || !LP_BACKTEST_DATA.length) return;
+  const days = Math.max(1, Number(document.getElementById('bt-days')?.value || 7));
+  const win = Math.max(5, Math.min(240, Number(document.getElementById('bt-window')?.value || 30)));
+  const threshold = Math.max(0.0001, Number(document.getElementById('bt-threshold')?.value || 0.20) / 100);
+  const cap = Math.max(1, Number(document.getElementById('bt-cap')?.value || 6));
+  const minRange = Math.max(0.001, Number(document.getElementById('bt-min-range')?.value || 10) / 100);
+  const maxRange = Math.max(minRange + 0.001, Number(document.getElementById('bt-max-range')?.value || 25) / 100);
+  const lastT = LP_BACKTEST_DATA[LP_BACKTEST_DATA.length-1].t;
+  const cutoff = lastT - days*24*60*60*1000;
+  const rows = LP_BACKTEST_DATA.filter(r => r.t >= cutoff);
+  const vols = [];
+  for(let i=0;i<rows.length;i++){
+    const start = Math.max(0, i-win+1);
+    const samp = rows.slice(start, i+1).map(r=>r.p);
+    if(samp.length < Math.min(8, win)){ vols.push(null); continue; }
+    const rets=[];
+    for(let j=1;j<samp.length;j++) if(samp[j-1]>0 && samp[j]>0) rets.push(Math.log(samp[j]/samp[j-1]));
+    vols.push(_btStd(rets));
+  }
+  const volTriggers = vols.map(v => v !== null && v > threshold);
+  const desiredRangePct = vols.map(v => v === null ? minRange : _btStep5(_btClamp(minRange + Math.max(0, (v / threshold) - 1) * 0.10, minRange, maxRange)));
+  const rangeUpper = [];
+  const rangeLower = [];
+  const activeRangePct = [];
+  const rb = [];
+  const rbKind = [];
+  const dayCount = {};
+  const rangeDrift = 0.35;
+  let activeUpper = null;
+  let activeLower = null;
+  let activeCenter = null;
+  let activePct = minRange;
+  for(let i=0;i<rows.length;i++){
+    const priceNow = rows[i].p;
+    if(activeUpper === null || activeLower === null){
+      activeCenter = priceNow;
+      activePct = desiredRangePct[i];
+      activeUpper = activeCenter * (1 + activePct);
+      activeLower = activeCenter * (1 - activePct);
+      rb.push(false);
+      rbKind.push('open');
+    }else{
+      const prevPct = activePct;
+      const volHigh = volTriggers[i];
+      const widenNeeded = volHigh && desiredRangePct[i] > activePct * (1 + 0.01);
+      const calmNormalize = vols[i] !== null && vols[i] <= threshold && desiredRangePct[i] < activePct / (1 + rangeDrift);
+      const shouldRebalance = widenNeeded || calmNormalize;
+      const k = _btDayKey(rows[i].t);
+      dayCount[k] = dayCount[k] || 0;
+      if(shouldRebalance && dayCount[k] < cap){
+        dayCount[k]++;
+        activePct = desiredRangePct[i];
+        activeUpper = activeCenter * (1 + activePct);
+        activeLower = activeCenter * (1 - activePct);
+        rb.push(true);
+        if(activePct > prevPct * (1 + 0.01)) rbKind.push('widen');
+        else if(activePct < prevPct / (1 + rangeDrift)) rbKind.push('normalize');
+        else rbKind.push('widen');
+      }else{
+        rb.push(false);
+        rbKind.push('hold');
+      }
+    }
+    rangeUpper.push(activeUpper);
+    rangeLower.push(activeLower);
+    activeRangePct.push(activePct);
+  }
+  const validRanges = activeRangePct.filter(v => Number.isFinite(v));
+  const valid = vols.filter(v=>v!==null);
+  const avg = valid.length ? _btMean(valid) : 0;
+  const mx = valid.length ? Math.max(...valid) : 0;
+  const spikeN = volTriggers.filter(Boolean).length;
+  const rbN = rb.filter(Boolean).length;
+  const widenN = rbKind.filter(k=>k==='widen').length;
+  const normalizeN = rbKind.filter(k=>k==='normalize').length;
+  const pct = valid.length ? spikeN/valid.length*100 : 0;
+  const set = (id, txt) => { const el=document.getElementById(id); if(el) el.textContent=txt; };
+  set('bt-avg', (avg*100).toFixed(3)+'%');
+  set('bt-max', (mx*100).toFixed(3)+'%');
+  set('bt-spikes', spikeN + ' (' + pct.toFixed(2) + '%)');
+  set('bt-rebalances', String(rbN));
+  set('bt-avg-range', '±' + (_btMean(validRanges)*100).toFixed(1) + '%');
+  set('bt-latest-range', '±' + ((activeRangePct[activeRangePct.length-1] || minRange)*100).toFixed(1) + '%');
+  set('bt-actions', widenN + ' / ' + normalizeN);
+  const labels = rows.map(r => new Date(r.t).toLocaleString('en-US',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}));
+  const price = rows.map(r=>r.p);
+  const volPct = vols.map(v=>v===null?null:v*100);
+  const thPct = rows.map(_=>threshold*100);
+  const widenPts = rows.map((r,i)=> rbKind[i] === 'widen' ? {x:i, y:price[i]} : null).filter(Boolean);
+  const normalizePts = rows.map((r,i)=> rbKind[i] === 'normalize' ? {x:i, y:price[i]} : null).filter(Boolean);
+  const cfg = {
+    type:'line',
+    data:{labels,datasets:[
+      {label:'SUI price', data:price, yAxisID:'y', borderColor:'#4da2ff', backgroundColor:'#4da2ff33', borderWidth:2, pointRadius:0, tension:.18},
+      {label:'LP range upper', data:rangeUpper, yAxisID:'y', borderColor:'#bc7def', backgroundColor:'#bc7def12', borderWidth:1.5, pointRadius:0, tension:.18, borderDash:[4,4]},
+      {label:'LP range lower', data:rangeLower, yAxisID:'y', borderColor:'#bc7def', backgroundColor:'#bc7def12', borderWidth:1.5, pointRadius:0, tension:.18, borderDash:[4,4], fill:'-1'},
+      {label:'Calculated vol %', data:volPct, yAxisID:'y1', borderColor:'#34d399', backgroundColor:'#34d39933', borderWidth:2, pointRadius:0, tension:.18},
+      {label:'Threshold %', data:thPct, yAxisID:'y1', borderColor:'#fbbf24', borderWidth:2, pointRadius:0, borderDash:[6,5]},
+      {label:'Widen range ▲', data:widenPts, type:'scatter', yAxisID:'y', parsing:false, pointRadius:5, pointHoverRadius:7, pointStyle:'triangle', rotation:0, backgroundColor:'#fb923c', borderColor:'#fff', borderWidth:1},
+      {label:'Normalize / shorten ▼', data:normalizePts, type:'scatter', yAxisID:'y', parsing:false, pointRadius:5, pointHoverRadius:7, pointStyle:'triangle', rotation:180, backgroundColor:'#22c55e', borderColor:'#fff', borderWidth:1}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},zoom:{limits:{x:{minRange:60*60*1000}},pan:{enabled:true,mode:'x',modifierKey:'ctrl'},zoom:{wheel:{enabled:true},pinch:{enabled:true},drag:{enabled:true,backgroundColor:'rgba(99,102,241,0.18)',borderColor:'rgba(99,102,241,0.6)',borderWidth:1},mode:'x'}},tooltip:{callbacks:{label:(ctx)=> ctx.dataset.label==='Calculated vol %'||ctx.dataset.label==='Threshold %' ? ctx.dataset.label+': '+Number(ctx.parsed.y).toFixed(3)+'%' : ctx.dataset.label+': '+Number(ctx.parsed.y).toFixed(4)}}},scales:{x:{ticks:{color:'#94a3b8',maxTicksLimit:7},grid:{color:'#1f2937'}},y:{position:'left',ticks:{color:'#94a3b8'},grid:{color:'#1f2937'}},y1:{position:'right',ticks:{color:'#94a3b8',callback:v=>v+'%'},grid:{drawOnChartArea:false}}}}
+  };
+  if(lpBacktestChart){ lpBacktestChart.destroy(); }
+  lpBacktestChart = new Chart(canvas.getContext('2d'), cfg);
+  applyLpBacktestVisibility();
+}
+""".replace('__LP_BACKTEST_DATA__', lp_backtest_data)
+
     return (
         '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
         '<meta charset="UTF-8">\n'
-        '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">\n'
         '<title>Portfolio Dashboard</title>\n'
-        '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>\n'
-        '<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>\n'
+        '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" referrerpolicy="no-referrer"></script>\n'
+        '<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js" integrity="sha384-Cs3dgUx6+jDxxuqHvVH8Onpyj2LF1gKZurLDlhqzuJmUqVYMJ0THTWpxK5Z086Zm" crossorigin="anonymous" referrerpolicy="no-referrer"></script>\n'
+        '<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js" integrity="sha384-zPzbVRXfR492Sd5D+HydTYCxxgHAfgVO8KERbLlpeH5unsmbAEXrscGUUqLZG9BM" crossorigin="anonymous" referrerpolicy="no-referrer"></script>\n'
+        '<script src="https://cdn.jsdelivr.net/npm/marked@14.1.4/marked.min.js" integrity="sha384-lqPzN0kmFw9t2syAMwVPM4VbAyqsz/lPyYWbb2Xt6nSPM0WPNrpSWCUBgdcAdgnC" crossorigin="anonymous" referrerpolicy="no-referrer"></script>\n'
+        '<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js" integrity="sha384-XQqX/4yiUGu+oyr87jvWzRuqBUK/adrY0DunhL+tID9m/9dwSpV8h9Fk/Sg6ifVQ" crossorigin="anonymous" referrerpolicy="no-referrer"></script>\n'
         '<style>' + CSS + '</style>\n'
         '</head>\n<body>\n\n'
         '<nav class="top-nav">\n'
         '  <div class="nav-left">\n'
-        '  <div class="nav-brand" onclick="goToMarket()">Kive <span style="color:#bc7def">Dashboard</span></div>\n'
-        '  <div class="page-menu" id="page-menu">\n'
-        '    <div class="page-menu-item active" id="page-menu-market" onclick="selectPage(\'market\',\'Market\',this)">Market</div>\n'
-        '    <div class="page-menu-item" onclick="selectPage(\'overview\',\'Overview\',this)">Overview</div>\n'
-        '    <div class="page-menu-item" onclick="selectPage(\'interest\',\'Cashflow\',this)">Cashflow</div>\n'
-        '    <div class="page-menu-item" onclick="selectPage(\'positions\',\'Positions\',this)">Positions</div>\n'
+        '  <div class="nav-brand" onclick="goToMarket()" role="button" tabindex="0" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();goToMarket()}">Kive <span style="color:#bc7def">Dashboard</span></div>\n'
+        '  <div class="page-menu" id="page-menu" role="tablist" aria-label="Dashboard sections">\n'
+        '    <button type="button" class="page-menu-item active" id="page-menu-market" role="tab" aria-selected="true" data-page="market" onclick="selectPage(\'market\')">Market</button>\n'
+        '    <button type="button" class="page-menu-item" role="tab" aria-selected="false" data-page="overview" onclick="selectPage(\'overview\')">Overview</button>\n'
+        '    <button type="button" class="page-menu-item" role="tab" aria-selected="false" data-page="agents" onclick="selectPage(\'agents\')">Agents</button>\n'
         '  </div></div>\n'
-        f'  <div class="nav-right"><div class="nav-ts">Updated {ts}</div>\n'
-        '  <button id="privacy-btn" class="nav-refresh-btn" onclick="togglePrivacy()" title="Hide numbers"><span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></span></button>\n'
-        '  <button id="refresh-btn" class="nav-refresh-btn" onclick="triggerRefresh()" title="Refresh"><span>&#8635;</span></button>\n'
+        f'  <div class="nav-right"><div class="nav-ts" id="nav-ts" data-updated="{updated_epoch}">Updated</div>\n'
+        '  <button id="privacy-btn" class="nav-refresh-btn" onclick="togglePrivacy()" title="Hide numbers" aria-label="Toggle balance visibility"><span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></span></button>\n'
+        '  <button id="refresh-btn" class="nav-refresh-btn" onclick="triggerRefresh()" title="Refresh" aria-label="Refresh data"><span>&#8635;</span></button>\n'
         '  </div>\n'
         '</nav>\n\n'
         '<div id="page-market" class="page active">\n' + market_page_html + '\n</div>\n\n'
         '<div id="page-overview" class="page">\n' + page1 + '\n</div>\n\n'
-        '<div id="page-interest" class="page">\n' + page3 + '\n</div>\n\n'
-        '<div id="page-positions" class="page">\n' + page2_html + '\n</div>\n\n'
+        '<div id="page-agents" class="page">\n' + agents_page_html + '\n</div>\n\n'
         '<div id="modal-ov" class="modal-ov" onclick="closeModal()">\n'
         '  <div class="modal-box" onclick="event.stopPropagation()">\n'
         '    <div id="modal-inner"></div>\n'
@@ -3125,7 +3884,7 @@ function switchChart(tab) {
         '</div>\n\n'
         + stock_modals + '\n\n'
         + modals_html + '\n\n'
-        '<script>\n' + JS + '\n' + chart_js + '\n</script>\n'
+        '<script>\n' + JS + '\n' + chart_js + '\n' + lp_backtest_js + '\n</script>\n'
         '</body>\n</html>'
     )
 
