@@ -33,6 +33,7 @@ _BV_RPC  = "https://sui-mainnet-endpoint.blockvision.org"
 WALLET_954C    = os.getenv("WALLET_954C", "")
 WALLET_E64C    = os.getenv("WALLET_E64C", "")
 DASHBOARD_PASS = os.getenv("DASHBOARD_PASS", "changeme")
+DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
 SCALLOP_BS_TBL = "0x8708eb23153bdc4b345c9f536fe05b62206f3f55629b26389d4fe5f129bd8368"
 OBLIGATION_CAP = "::lending_market::ObligationOwnerCap"
 CETUS_POS_TYPE   = "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position"
@@ -2757,7 +2758,7 @@ function closeLoginModal() {
 function submitLogin() {
   const u = document.getElementById('login-user').value.trim();
   const p = document.getElementById('login-pass').value;
-  if (u === 'admin' && p === '__DASH_PASS__') {
+  if (u === '__DASH_USER__' && p === '__DASH_PASS__') {
     document.body.classList.remove('priv-on');
     updatePrivacyBtn(false);
     closeLoginModal();
@@ -3886,7 +3887,7 @@ function renderLpBacktest(){
         '</div>\n\n'
         + stock_modals + '\n\n'
         + modals_html + '\n\n'
-        '<script>\n' + JS.replace('__DASH_PASS__', DASHBOARD_PASS) + '\n' + chart_js + '\n' + lp_backtest_js + '\n</script>\n'
+        '<script>\n' + JS.replace('__DASH_USER__', DASHBOARD_USER).replace('__DASH_PASS__', DASHBOARD_PASS) + '\n' + chart_js + '\n' + lp_backtest_js + '\n</script>\n'
         '</body>\n</html>'
     )
 
