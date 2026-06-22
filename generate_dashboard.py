@@ -1314,8 +1314,8 @@ def _build_positions(data, p):
                 {"sym": "afSUI", "amount": a["afsui_amt"], "usd": a["afsui_usd"], "note": "pending reward"},
             ],
             "stats": [
-                {"label": "LP Share", "value": f"{a['lp_frac']:.2%}",       "color": "#94a3b8"},
-                {"label": "Weights",  "value": "80% USDC / 20% SUI",         "color": "#94a3b8"},
+                {"label": "LP Share", "value": f"{a['lp_frac']:.2%}",       "color": "#a1a1aa"},
+                {"label": "Weights",  "value": "80% USDC / 20% SUI",         "color": "#a1a1aa"},
                 {"label": "Reward",   "value": f"{a['afsui_amt']:.4f} afSUI","color": "#60a5fa"},
             ],
             "range_info": None, "status": None, "status_color": None,
@@ -1473,10 +1473,10 @@ def _build_positions(data, p):
             {"sym": "DEEP",   "amount": af["deep_amt"], "usd": af["deep_usd"], "note": "pending reward"},
         ],
         "stats": [
-            {"label": "LP Share",  "value": f"{af['lp_frac']:.2%}",      "color": "#94a3b8"},
-            {"label": "Weights",   "value": "60% WBTC / 40% LBTC",       "color": "#94a3b8"},
+            {"label": "LP Share",  "value": f"{af['lp_frac']:.2%}",      "color": "#a1a1aa"},
+            {"label": "Weights",   "value": "60% WBTC / 40% LBTC",       "color": "#a1a1aa"},
             {"label": "Reward",    "value": f"{af['deep_amt']:.4f} DEEP", "color": "#60a5fa"},
-            {"label": "Lock",      "value": "14d  2× multiplier",         "color": "#94a3b8"},
+            {"label": "Lock",      "value": "14d  2× multiplier",         "color": "#a1a1aa"},
         ],
         "range_info": None, "status": None, "status_color": None,
     })
@@ -1573,9 +1573,9 @@ def _build_positions(data, p):
                 {"sym": "BLUE",  "amount": ember["blue_amt"],  "usd": ember["blue_usd"]},
             ],
             "stats": [
-                {"label": "Exchange Rate", "value": f"{ember.get('rate', 1):.6f} BLUE/eBLUE", "color": "#94a3b8"},
+                {"label": "Exchange Rate", "value": f"{ember.get('rate', 1):.6f} BLUE/eBLUE", "color": "#a1a1aa"},
                 {"label": "Yield",         "value": f"{ember.get('yield_pct', 0):.3f}%",       "color": "#10b981"},
-                {"label": "Objects",       "value": str(ember.get("n_objects", 0)),             "color": "#94a3b8"},
+                {"label": "Objects",       "value": str(ember.get("n_objects", 0)),             "color": "#a1a1aa"},
             ],
             "range_info": None, "status": None, "status_color": None,
         })
@@ -1622,7 +1622,7 @@ def _build_positions(data, p):
             "card_rows": future_rows[:3],
             "modal_tokens": futures_modal,
             "stats": [
-                {"label": "Wallet Balance", "value": fmt(bn.get("futures_wallet", 0)), "color": "#94a3b8"},
+                {"label": "Wallet Balance", "value": fmt(bn.get("futures_wallet", 0)), "color": "#a1a1aa"},
                 {"label": "Unrealized PnL", "value": fmt(bn.get("futures_pnl", 0)),    "color": "#10b981" if bn.get("futures_pnl", 0) >= 0 else "#f87171"},
             ],
             "range_info": None, "status": None, "status_color": None,
@@ -1663,7 +1663,7 @@ def _pos_card(pos):
         status = f'<div class="pc-status" style="color:{sc}">&#9679; {pos["status"]}</div>'
     rows = ""
     for sym, val, is_debt in pos["card_rows"][:3]:
-        tc = "#f87171" if is_debt else "#94a3b8"
+        tc = "#f87171" if is_debt else "#a1a1aa"
         sign = "−" if is_debt else ""
         rows += (f'<div class="pc-row">'
                  f'<span class="pc-sym" style="color:{tc}">{sym}</span>'
@@ -1674,11 +1674,11 @@ def _pos_card(pos):
     else:
         auto_html = '<div class="pc-live" style="color:#f8717188">&#9679; MANUAL</div>'
     return (
-        f'<div class="pos-card" style="border-top:3px solid {color}" onclick="openModal(\'{pos["id"]}\')">'
+        f'<div class="pos-card" style="border-top:3px solid var(--border2)" onclick="openModal(\'{pos["id"]}\')">'
         f'<div class="pc-header">'
         f'<div class="pc-badges">'
-        f'<span class="badge" style="background:{color}22;color:{color}">{pos["protocol"]}</span>'
-        f'<span class="badge" style="background:#ffffff11;color:#94a3b8">{pos["badge"]}</span>'
+        f'<span class="badge" style="background:#ffffff12;color:var(--text2)">{pos["protocol"]}</span>'
+        f'<span class="badge" style="background:#ffffff11;color:#a1a1aa">{pos["badge"]}</span>'
         f'</div><div class="pc-arrow">&#8250;</div></div>'
         f'<div class="pc-title">{pos["title"]}</div>'
         f'{status}'
@@ -1710,7 +1710,7 @@ def _modal_content(pos):
             continue
         is_debt = t.get("is_debt", False)
         is_dim  = t.get("dim", False)
-        sym_col = "#475569" if is_dim else ("#f87171" if is_debt else "#94a3b8")
+        sym_col = "#475569" if is_dim else ("#f87171" if is_debt else "#a1a1aa")
         num_col = "#475569" if is_dim else ("#f87171" if is_debt else "#e2e8f0")
         sign = "−" if is_debt else ""
         note = f' <span class="mt-note">{t["note"]}</span>' if t.get("note") else ""
@@ -1737,8 +1737,8 @@ def _modal_content(pos):
         f'<div>'
         f'<div class="md-title">{pos["title"]}</div>'
         f'<div class="md-badges">'
-        f'<span class="badge" style="background:{color}22;color:{color}">{pos["protocol"]}</span>'
-        f'<span class="badge" style="background:#ffffff11;color:#94a3b8">{pos["badge"]}</span>'
+        f'<span class="badge" style="background:#ffffff12;color:var(--text2)">{pos["protocol"]}</span>'
+        f'<span class="badge" style="background:#ffffff11;color:#a1a1aa">{pos["badge"]}</span>'
         f'</div></div>'
         f'<button class="md-close" onclick="closeModal()">&#10005;</button>'
         f'</div>'
@@ -1861,7 +1861,7 @@ def _stock_card(s):
     name_esc = s.get("name", s["ticker"]).replace("'", "\\'")
     onclick  = f"openStockEdit('{s['ticker']}',{s['shares']},{s['avg_cost']},'{s.get('currency','USD')}','{name_esc}')"
     return (
-        f'<div class="pos-card stock-card" style="border-top:3px solid {color};cursor:pointer" onclick="{onclick}">'
+        f'<div class="pos-card stock-card" style="border-top:3px solid var(--border2);cursor:pointer" onclick="{onclick}">'
         f'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">'
         f'<div>'
         f'<div class="priv" style="font-weight:700;font-size:.95rem;color:#f1f5f9">{s["ticker"]}</div>'
@@ -1871,13 +1871,13 @@ def _stock_card(s):
         f'<div class="priv" style="font-size:.82rem;font-weight:600;color:#f1f5f9">${s.get("market_value",0):,.0f}</div>'
         f'<div class="priv" style="font-size:.64rem;color:{gc}">{gsign}{gain:.1f}%</div>'
         f'</div></div>'
-        f'<div class="priv" style="font-size:.72rem;color:#94a3b8;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+        f'<div class="priv" style="font-size:.72rem;color:#a1a1aa;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
         f'{s.get("name", s["ticker"])}</div>'
         f'<div style="display:flex;justify-content:space-between;font-size:.72rem">'
         f'<span class="priv" style="color:#64748b">{s["shares"]:,.2f} sh @ {csym}{s["avg_cost"]:,.2f}</span>'
         f'<span class="priv" style="color:{dc}">{dsign}{daily:.1f}%<span style="color:#475569"> 1d</span></span>'
         f'</div>'
-        f'<div class="pc-edit-hint" style="font-size:.68rem;color:#4da2ff;font-weight:600;margin-top:4px">&#9998; Edit</div>'
+        f'<div class="pc-edit-hint" style="font-size:.68rem;color:var(--text2);font-weight:600;margin-top:4px">&#9998; Edit</div>'
         f'</div>'
     )
 
@@ -2069,7 +2069,7 @@ def build_html(data):
     _proto_agg = {}  # label → (value, color)
 
     def _padd(label, value, proto_key=None):
-        color = _PROTO_COLOR.get(proto_key or label, "#94a3b8")
+        color = _PROTO_COLOR.get(proto_key or label, "#a1a1aa")
         _proto_agg[label] = (_proto_agg.get(label, (0, color))[0] + value, color)
 
     _padd("Aftermath", round(af["total"] + data["amm_8020"]["total"], 2), "Aftermath")
@@ -2102,15 +2102,16 @@ def build_html(data):
     proto_sorted = sorted(_proto_agg.items(), key=lambda x: x[1][0], reverse=True)
     proto_labels = [x[0]    for x in proto_sorted]
     proto_values = [x[1][0] for x in proto_sorted]
-    proto_colors = [x[1][1] for x in proto_sorted]
+    _GRAY_RAMP = ["#fafafa", "#d4d4d8", "#a1a1aa", "#71717a", "#52525b", "#3f3f46", "#27272a"]
+    proto_colors = [_GRAY_RAMP[i % len(_GRAY_RAMP)] for i in range(len(proto_sorted))]
 
     # ── Page 1: allocation bars
     categories = sorted([
-        ("AMM Positions", amm_total,                    "#f97316"),
-        ("Lending",       lending_total + lending_bn,   "#3b82f6"),
-        ("Staking",       onchain_total,                "#10b981"),
-        ("Futures",       cex_total,                    "#eab308"),
-        ("Stocks",        stocks_total,                 "#6366f1"),
+        ("AMM Positions", amm_total,                    "#fafafa"),
+        ("Lending",       lending_total + lending_bn,   "#a1a1aa"),
+        ("Staking",       onchain_total,                "#71717a"),
+        ("Futures",       cex_total,                    "#52525b"),
+        ("Stocks",        stocks_total,                 "#3f3f46"),
     ], key=lambda x: x[1], reverse=True)
     cat_rows = ""
     for lbl, val, col in categories:
@@ -2134,7 +2135,7 @@ def build_html(data):
 
     risk_cards = (
         f'<div class="risk-card">'
-        f'<div class="rh"><span class="badge" style="background:#3b82f622;color:#3b82f6">NAVI</span> Lending Risk</div>'
+        f'<div class="rh"><span class="badge" style="background:#ffffff12;color:var(--text2)">NAVI</span> Lending Risk</div>'
         f'<div class="ra-row">'
         f'<div class="ra-item"><span class="ra-lbl">Collateral</span><span class="ra-val">{fmt(n["col_usd"])}</span></div>'
         f'<div class="ra-item"><span class="ra-lbl">Debt</span><span class="ra-val" style="color:#f87171">{fmt(n["debt_usd"])}</span></div>'
@@ -2143,7 +2144,7 @@ def build_html(data):
         f'{navi_health}'
         f'</div>'
         f'<div class="risk-card">'
-        f'<div class="rh"><span class="badge" style="background:#f59e0b22;color:#f59e0b">Suilend</span> Lending Risk</div>'
+        f'<div class="rh"><span class="badge" style="background:#ffffff12;color:var(--text2)">Suilend</span> Lending Risk</div>'
         f'<div class="ra-row">'
         f'<div class="ra-item"><span class="ra-lbl">Collateral</span><span class="ra-val">{fmt(sl_col_usd)}</span></div>'
         f'<div class="ra-item"><span class="ra-lbl">Debt</span><span class="ra-val" style="color:#f87171">{fmt(sl_debt_usd)}</span></div>'
@@ -2188,7 +2189,7 @@ def build_html(data):
         port_str = f"${port:,.0f}" if port is not None else "—"
         int_rows += (
             f'<tr>'
-            f'<td style="color:#94a3b8;font-size:.78rem">{lbl}</td>'
+            f'<td style="color:#a1a1aa;font-size:.78rem">{lbl}</td>'
             f'<td class="priv" style="text-align:right;font-family:monospace;color:#e2e8f0">${main:,.2f}</td>'
             f'<td class="priv" style="text-align:right;font-family:monospace;color:#60a5fa">${mm:,.2f}</td>'
             f'<td class="priv" style="text-align:right;font-family:monospace;font-weight:600;color:#f1f5f9">${wk:,.2f}</td>'
@@ -2237,15 +2238,15 @@ def build_html(data):
         f"  data: {{\n"
         f"    labels: {json.dumps(int_labels)},\n"
         f"    datasets: [\n"
-        f"      {{ label: 'Main', data: {json.dumps(int_main)}, backgroundColor: '#f97316', borderRadius: 3, borderWidth: 0 }},\n"
-        f"      {{ label: 'MM',   data: {json.dumps(int_mm)},   backgroundColor: '#6366f1', borderRadius: 3, borderWidth: 0 }}\n"
+        f"      {{ label: 'Main', data: {json.dumps(int_main)}, backgroundColor: '#fafafa', borderRadius: 3, borderWidth: 0 }},\n"
+        f"      {{ label: 'MM',   data: {json.dumps(int_mm)},   backgroundColor: '#71717a', borderRadius: 3, borderWidth: 0 }}\n"
         f"    ]\n"
         f"  }},\n"
         f"  options: {{\n"
-        f"    plugins: {{ legend: {{ labels: {{ color: '#94a3b8', font: {{ size: 11 }} }} }} }},\n"
+        f"    plugins: {{ legend: {{ labels: {{ color: '#a1a1aa', font: {{ size: 11 }} }} }} }},\n"
         f"    scales: {{\n"
-        f"      x: {{ stacked: true, grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 9 }}, maxRotation: 45 }} }},\n"
-        f"      y: {{ stacked: true, grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#94a3b8', callback: v => '$' + v }} }}\n"
+        f"      x: {{ stacked: true, grid: {{ display: false }}, ticks: {{ color: '#a1a1aa', font: {{ size: 9 }}, maxRotation: 45 }} }},\n"
+        f"      y: {{ stacked: true, grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#a1a1aa', callback: v => '$' + v }} }}\n"
         f"    }}\n"
         f"  }}\n"
         f"}});\n\n"
@@ -2255,14 +2256,14 @@ def build_html(data):
         f"  data: {{\n"
         f"    labels: {json.dumps([d[0] for d in yield_weeks])},\n"
         f"    datasets: [{{ label: 'Ann. Yield %', data: {json.dumps([d[4] for d in yield_weeks])},\n"
-        f"      borderColor: '#10b981', backgroundColor: '#10b98112', borderWidth: 2,\n"
+        f"      borderColor: '#fafafa', backgroundColor: '#fafafa12', borderWidth: 2,\n"
         f"      pointRadius: 3, tension: 0.3, fill: true }}]\n"
         f"  }},\n"
         f"  options: {{\n"
         f"    plugins: {{ legend: {{ display: false }} }},\n"
         f"    scales: {{\n"
-        f"      x: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 9 }}, maxRotation: 45 }} }},\n"
-        f"      y: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#94a3b8', callback: v => v + '%' }} }}\n"
+        f"      x: {{ grid: {{ display: false }}, ticks: {{ color: '#a1a1aa', font: {{ size: 9 }}, maxRotation: 45 }} }},\n"
+        f"      y: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#a1a1aa', callback: v => v + '%' }} }}\n"
         f"    }}\n"
         f"  }}\n"
         f"}});\n\n"
@@ -2316,15 +2317,15 @@ def build_html(data):
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700;800&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0d111b;--surface:#18222b;--surface2:#1e2933;--surface3:#24303e;
-  --border:#ffffff0d;--border2:#ffffff18;
-  --text:#e8eaf0;--text2:#8892a4;--text3:#6b778c;
-  --accent:#4da2ff;--accent2:#6fbcf0;--accent-glow:#4da2ff33;
-  --green:#10b981;--red:#f87171;--orange:#f97316;--yellow:#f59e0b;
-  --blue:#3b82f6;--purple:#8b5cf6;
+  --bg:#09090b;--surface:#101012;--surface2:#18181b;--surface3:#212124;
+  --border:#ffffff12;--border2:#ffffff24;
+  --text:#fafafa;--text2:#a1a1aa;--text3:#71717a;
+  --accent:#fafafa;--accent2:#e4e4e7;--accent-glow:#ffffff14;
+  --green:#34d399;--red:#f87171;--orange:#f97316;--yellow:#f59e0b;
+  --blue:#a1a1aa;--purple:#71717a;
   --font-display:'Space Grotesk',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
 }
-body{background:radial-gradient(ellipse 1000px 700px at 50% -10%,#9945ff33,transparent 70%),radial-gradient(ellipse 1000px 900px at 0% 100%,#5eead466,transparent 75%),radial-gradient(ellipse 1000px 900px at 100% 100%,#5eead466,transparent 75%),var(--bg);background-attachment:fixed;color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;line-height:1.5;-webkit-font-smoothing:antialiased}
+body{background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh;line-height:1.5;-webkit-font-smoothing:antialiased}
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar{width:5px;height:5px}
@@ -2519,14 +2520,14 @@ body.priv-on .add-stock-btn{pointer-events:none;opacity:.35;cursor:not-allowed}
 
 /* ── Stock modals ── */
 .add-stock-btn{padding:6px 14px;border-radius:8px;border:1px solid var(--accent);background:var(--accent-glow);color:var(--accent2);font-size:.71rem;font-weight:600;cursor:pointer;transition:all .18s;font-family:inherit}
-.add-stock-btn:hover{background:#6366f133;box-shadow:0 0 16px var(--accent-glow)}
+.add-stock-btn:hover{background:var(--surface3);box-shadow:0 0 16px var(--accent-glow)}
 .se-field{display:flex;flex-direction:column;gap:5px;margin-bottom:14px;padding:0 22px}
 .se-lbl{font-size:.65rem;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;font-weight:500}
 .se-input{background:var(--bg);border:1px solid var(--border2);border-radius:10px;color:var(--text);font-size:.93rem;padding:10px 13px;width:100%;outline:none;font-family:'SF Mono',ui-monospace,monospace;appearance:none;transition:border-color .18s,box-shadow .18s}
 .se-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
 .se-hint{font-size:.62rem;color:var(--text3);margin-top:4px}
-.se-save{margin:6px 22px 22px;width:calc(100% - 44px);padding:11px;border-radius:10px;border:none;background:linear-gradient(135deg,#4da2ff,#6fbcf0);color:#fff;font-size:.85rem;font-weight:700;cursor:pointer;transition:all .18s;display:block;letter-spacing:.01em;font-family:inherit;box-shadow:0 4px 16px #4da2ff40}
-.se-save:hover:not(:disabled){opacity:.9;box-shadow:0 6px 24px #4da2ff55;transform:translateY(-1px)}
+.se-save{margin:6px 22px 22px;width:calc(100% - 44px);padding:11px;border-radius:10px;border:none;background:var(--text);color:#09090b;font-size:.85rem;font-weight:700;cursor:pointer;transition:all .18s;display:block;letter-spacing:.01em;font-family:inherit}
+.se-save:hover:not(:disabled){opacity:.85;transform:translateY(-1px)}
 .se-save:disabled{opacity:.4;cursor:not-allowed;box-shadow:none;transform:none}
 
 /* ── Allocation bars (unused but keep for compat) ── */
@@ -2540,7 +2541,7 @@ body.priv-on .add-stock-btn{pointer-events:none;opacity:.35;cursor:not-allowed}
 .overview-subnav,.agent-subnav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px;padding:7px;background:var(--surface);border:1px solid var(--border);border-radius:16px;width:max-content;max-width:100%}
 .overview-subtab,.agent-subtab{appearance:none;-webkit-appearance:none;border:none;background:transparent;color:var(--text2);font-family:inherit;font-size:.82rem;font-weight:650;padding:8px 14px;border-radius:11px;cursor:pointer;transition:background .15s,color .15s,box-shadow .15s;white-space:nowrap}
 .overview-subtab:hover,.agent-subtab:hover{background:var(--surface2);color:var(--text)}
-.overview-subtab.active,.agent-subtab.active{background:linear-gradient(135deg,#4da2ff22,#bc7def22);color:var(--accent);box-shadow:inset 0 0 0 1px var(--border2)}
+.overview-subtab.active,.agent-subtab.active{background:var(--accent-glow);color:var(--accent);box-shadow:inset 0 0 0 1px var(--border2)}
 .overview-panel,.agent-panel{display:none}
 .overview-panel.active,.agent-panel.active{display:block}
 .agent-graph-img{display:block;width:100%;height:auto;border-radius:16px;border:1px solid var(--border);background:var(--surface2);margin-top:14px}
@@ -2556,7 +2557,7 @@ body.priv-on .add-stock-btn{pointer-events:none;opacity:.35;cursor:not-allowed}
 .bt-chart-wrap{height:420px;background:var(--surface2);border:1px solid var(--border);border-radius:16px;padding:14px;margin-top:12px}
 .bt-toggles{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 12px}
 .bt-toggle{display:inline-flex;align-items:center;gap:7px;background:var(--surface2);border:1px solid var(--border);border-radius:999px;color:var(--text2);font-size:.72rem;padding:7px 10px;cursor:pointer;user-select:none}
-.bt-toggle input{accent-color:#4da2ff}
+.bt-toggle input{accent-color:#fafafa}
 
 /* ── Phone fit / safe-area polish ── */
 html{width:100%;max-width:100%;overflow-x:hidden}
@@ -3056,14 +3057,14 @@ async function mbDelete(date) {
         f"    plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: ctx => ' $' + ctx.parsed.x.toLocaleString(undefined, {{minimumFractionDigits:0,maximumFractionDigits:0}}) }} }} }},\n"
         f"    scales: {{\n"
         f"      x: {{ display: false }},\n"
-        f"      y: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 11 }} }} }}\n"
+        f"      y: {{ grid: {{ display: false }}, ticks: {{ color: '#a1a1aa', font: {{ size: 11 }} }} }}\n"
         f"    }}\n"
         f"  }},\n"
         f"  plugins: [{{ id:'barLabels', afterDatasetsDraw(chart) {{\n"
         f"    const {{ctx, scales: {{x, y}}}} = chart;\n"
         f"    chart.data.datasets[0].data.forEach((v, i) => {{\n"
         f"      const bar = chart.getDatasetMeta(0).data[i];\n"
-        f"      ctx.save(); ctx.fillStyle='#94a3b8'; ctx.font='11px monospace';\n"
+        f"      ctx.save(); ctx.fillStyle='#a1a1aa'; ctx.font='11px monospace';\n"
         f"      ctx.textAlign='left'; ctx.textBaseline='middle';\n"
         f"      ctx.fillText('$'+v.toLocaleString(undefined,{{maximumFractionDigits:0}}), bar.x+8, bar.y);\n"
         f"      ctx.restore();\n"
@@ -3084,9 +3085,9 @@ async function mbDelete(date) {
         f"  data: {{\n"
         f"    labels: {json.dumps(hist_dates)},\n"
         f"    datasets: [\n"
-        f"      {{ label: 'Total', data: {json.dumps(hist_total)}, borderColor: '#f1f5f9', backgroundColor: '#f1f5f908', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }},\n"
-        f"      {{ label: 'Crypto', data: {json.dumps(hist_crypto)}, borderColor: '#4da2ff', backgroundColor: '#4da2ff08', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }},\n"
-        f"      {{ label: 'Stocks', data: {json.dumps(hist_stock)}, borderColor: '#6366f1', backgroundColor: '#6366f108', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }}\n"
+        f"      {{ label: 'Total', data: {json.dumps(hist_total)}, borderColor: '#fafafa', backgroundColor: '#fafafa08', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }},\n"
+        f"      {{ label: 'Crypto', data: {json.dumps(hist_crypto)}, borderColor: '#a1a1aa', backgroundColor: '#a1a1aa08', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }},\n"
+        f"      {{ label: 'Stocks', data: {json.dumps(hist_stock)}, borderColor: '#52525b', backgroundColor: '#52525b08', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }}\n"
         f"    ]\n"
         f"  }},\n"
         f"  options: {{\n"
@@ -3097,8 +3098,8 @@ async function mbDelete(date) {
         f"      tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:0,maximumFractionDigits:0}}) }} }}\n"
         f"    }},\n"
         f"    scales: {{\n"
-        f"      x: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#94a3b8', font: {{ size: 10 }}, maxTicksLimit: 10 }} }},\n"
-        f"      y: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#94a3b8', callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}\n"
+        f"      x: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#a1a1aa', font: {{ size: 10 }}, maxTicksLimit: 10 }} }},\n"
+        f"      y: {{ grid: {{ color: '#ffffff08' }}, ticks: {{ color: '#a1a1aa', callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}\n"
         f"    }}\n"
         f"  }}\n"
         f"}});\n"
@@ -3109,11 +3110,11 @@ async function mbDelete(date) {
     cat_values = []
     cat_colors_chart = []
     _cat_data = [
-        ("AMM",     amm_total,                    "#f97316"),
-        ("Lending", lending_total + lending_bn,   "#3b82f6"),
-        ("Staking", onchain_total,                "#10b981"),
-        ("Futures", cex_total,                    "#f59e0b"),
-        ("Stocks",  stocks_total,                 "#8b5cf6"),
+        ("AMM",     amm_total,                    "#fafafa"),
+        ("Lending", lending_total + lending_bn,   "#a1a1aa"),
+        ("Staking", onchain_total,                "#71717a"),
+        ("Futures", cex_total,                    "#52525b"),
+        ("Stocks",  stocks_total,                 "#3f3f46"),
     ]
     for lbl, val, col in sorted(_cat_data, key=lambda x: -x[1]):
         if val > 0:
@@ -3130,13 +3131,13 @@ async function mbDelete(date) {
         f"    indexAxis: 'y', maintainAspectRatio: false,\n"
         f"    layout: {{ padding: {{ right: 90 }} }},\n"
         f"    plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: ctx => ' $' + ctx.parsed.x.toLocaleString(undefined,{{maximumFractionDigits:0}}) }} }} }},\n"
-        f"    scales: {{ x: {{ display: false }}, y: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', font: {{ size: 12 }} }} }} }}\n"
+        f"    scales: {{ x: {{ display: false }}, y: {{ grid: {{ display: false }}, ticks: {{ color: '#a1a1aa', font: {{ size: 12 }} }} }} }}\n"
         f"  }},\n"
         f"  plugins: [{{ id:'catLabels', afterDatasetsDraw(chart) {{\n"
         f"    const {{ctx, scales: {{x, y}}}} = chart;\n"
         f"    chart.data.datasets[0].data.forEach((v, i) => {{\n"
         f"      const bar = chart.getDatasetMeta(0).data[i];\n"
-        f"      ctx.save(); ctx.fillStyle='#94a3b8'; ctx.font='11px monospace';\n"
+        f"      ctx.save(); ctx.fillStyle='#a1a1aa'; ctx.font='11px monospace';\n"
         f"      ctx.textAlign='left'; ctx.textBaseline='middle';\n"
         f"      ctx.fillText('$'+v.toLocaleString(undefined,{{maximumFractionDigits:0}}), bar.x+8, bar.y);\n"
         f"      ctx.restore();\n"
@@ -3153,9 +3154,9 @@ async function mbDelete(date) {
     cash_usd   = sum(s.get("market_value", 0) for s in stocks if s["ticker"].upper() == "CASH")
     stock_usd  = sum(s.get("market_value", 0) for s in stocks if s["ticker"].upper() != "CASH")
     _asset_data = [
-        ("Crypto",       crypto_usd,             "#34d399"),
-        ("Stock",        stock_usd,              "#8b5cf6"),
-        ("Stable asset", stable_cr + cash_usd,   "#38bdf8"),
+        ("Crypto",       crypto_usd,             "#fafafa"),
+        ("Stock",        stock_usd,              "#a1a1aa"),
+        ("Stable asset", stable_cr + cash_usd,   "#52525b"),
     ]
     _ad = [(l, round(v, 2), c) for l, v, c in _asset_data if v > 0]
     asset_labels  = [x[0] for x in _ad]
@@ -3167,11 +3168,11 @@ async function mbDelete(date) {
         f"const _assetTotal = _assetData.reduce((a,b)=>a+b,0) || 1;\n"
         f"new Chart(assetCtx, {{\n"
         f"  type: 'doughnut',\n"
-        f"  data: {{ labels: {json.dumps(asset_labels)}, datasets: [{{ data: _assetData, backgroundColor: {json.dumps(asset_colors)}, borderColor: '#0f172a', borderWidth: 2 }}] }},\n"
+        f"  data: {{ labels: {json.dumps(asset_labels)}, datasets: [{{ data: _assetData, backgroundColor: {json.dumps(asset_colors)}, borderColor: '#101012', borderWidth: 2 }}] }},\n"
         f"  options: {{\n"
         f"    maintainAspectRatio: false, cutout: '62%',\n"
         f"    plugins: {{\n"
-        f"      legend: {{ position: 'bottom', labels: {{ color: '#94a3b8', font: {{ size: 12 }}, padding: 16, usePointStyle: true }} }},\n"
+        f"      legend: {{ position: 'bottom', labels: {{ color: '#a1a1aa', font: {{ size: 12 }}, padding: 16, usePointStyle: true }} }},\n"
         f"      tooltip: {{ callbacks: {{ label: ctx => ' ' + ctx.label + ': $' + ctx.parsed.toLocaleString(undefined,{{maximumFractionDigits:0}}) + '  (' + (ctx.parsed/_assetTotal*100).toFixed(1) + '%)' }} }}\n"
         f"    }}\n"
         f"  }}\n"
@@ -3179,7 +3180,7 @@ async function mbDelete(date) {
     )
 
     # ── Second By-asset donut: Crypto vs Stock (uses the Portfolio History totals)
-    _cs_data = [("Crypto", crypto_total, "#34d399"), ("Stock", stocks_total, "#8b5cf6")]
+    _cs_data = [("Crypto", crypto_total, "#fafafa"), ("Stock", stocks_total, "#a1a1aa")]
     _cs = [(l, round(v, 2), c) for l, v, c in _cs_data if v > 0]
     cs_labels = [x[0] for x in _cs]
     cs_values = [x[1] for x in _cs]
@@ -3190,11 +3191,11 @@ async function mbDelete(date) {
         f"const _csTotal = _csData.reduce((a,b)=>a+b,0) || 1;\n"
         f"new Chart(assetCsCtx, {{\n"
         f"  type: 'doughnut',\n"
-        f"  data: {{ labels: {json.dumps(cs_labels)}, datasets: [{{ data: _csData, backgroundColor: {json.dumps(cs_colors)}, borderColor: '#0f172a', borderWidth: 2 }}] }},\n"
+        f"  data: {{ labels: {json.dumps(cs_labels)}, datasets: [{{ data: _csData, backgroundColor: {json.dumps(cs_colors)}, borderColor: '#101012', borderWidth: 2 }}] }},\n"
         f"  options: {{\n"
         f"    maintainAspectRatio: false, cutout: '62%',\n"
         f"    plugins: {{\n"
-        f"      legend: {{ position: 'bottom', labels: {{ color: '#94a3b8', font: {{ size: 12 }}, padding: 16, usePointStyle: true }} }},\n"
+        f"      legend: {{ position: 'bottom', labels: {{ color: '#a1a1aa', font: {{ size: 12 }}, padding: 16, usePointStyle: true }} }},\n"
         f"      tooltip: {{ callbacks: {{ label: ctx => ' ' + ctx.label + ': $' + ctx.parsed.toLocaleString(undefined,{{maximumFractionDigits:0}}) + '  (' + (ctx.parsed/_csTotal*100).toFixed(1) + '%)' }} }}\n"
         f"    }}\n"
         f"  }}\n"
@@ -3225,9 +3226,9 @@ function switchChart(tab) {
         '</div>'
         '<div id="pane-history" class="chart-pane active">'
         '<div class="hist-legend">'
-        '<label class="hl-item" style="--c:#f1f5f9"><input type="checkbox" checked onchange="toggleHistLine(0,this.checked)"><span class="hl-dot"></span>Total</label>'
-        '<label class="hl-item" style="--c:#4da2ff"><input type="checkbox" checked onchange="toggleHistLine(1,this.checked)"><span class="hl-dot"></span>Crypto</label>'
-        '<label class="hl-item" style="--c:#6366f1"><input type="checkbox" checked onchange="toggleHistLine(2,this.checked)"><span class="hl-dot"></span>Stocks</label>'
+        '<label class="hl-item" style="--c:#fafafa"><input type="checkbox" checked onchange="toggleHistLine(0,this.checked)"><span class="hl-dot"></span>Total</label>'
+        '<label class="hl-item" style="--c:#a1a1aa"><input type="checkbox" checked onchange="toggleHistLine(1,this.checked)"><span class="hl-dot"></span>Crypto</label>'
+        '<label class="hl-item" style="--c:#52525b"><input type="checkbox" checked onchange="toggleHistLine(2,this.checked)"><span class="hl-dot"></span>Stocks</label>'
         '</div>'
         '<canvas id="history-chart" role="img" aria-label="Line chart of portfolio value over time: total, crypto and stocks"></canvas></div>'
         f'<div id="pane-protocol" class="chart-pane"><div style="height:{bar_h}px"><canvas id="bar" role="img" aria-label="Bar chart of value by protocol"></canvas></div></div>'
@@ -3235,11 +3236,11 @@ function switchChart(tab) {
         '<div id="pane-asset" class="chart-pane">'
         '<div style="display:flex;flex-wrap:wrap;gap:24px;justify-content:center">'
         '<div style="flex:1;min-width:240px;max-width:430px">'
-        '<div style="text-align:center;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:#94a3b8;margin-bottom:8px">Crypto / Stock / Stable</div>'
+        '<div style="text-align:center;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:#a1a1aa;margin-bottom:8px">Crypto / Stock / Stable</div>'
         '<div style="height:320px"><canvas id="asset-chart" role="img" aria-label="Doughnut chart of allocation by asset type: crypto, stock, stable asset"></canvas></div>'
         '</div>'
         '<div style="flex:1;min-width:240px;max-width:430px">'
-        '<div style="text-align:center;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:#94a3b8;margin-bottom:8px">Crypto vs Stock</div>'
+        '<div style="text-align:center;font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:#a1a1aa;margin-bottom:8px">Crypto vs Stock</div>'
         '<div style="height:320px"><canvas id="asset-cs-chart" role="img" aria-label="Doughnut chart of crypto versus stock allocation"></canvas></div>'
         '</div>'
         '</div></div>'
@@ -3287,7 +3288,7 @@ function switchChart(tab) {
 .mb-category-filter{{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}}
 .mb-filter-btn{{background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:7px 16px;font-size:.78rem;font-weight:600;color:var(--text2);cursor:pointer;transition:all .15s;font-family:inherit}}
 .mb-filter-btn:hover{{border-color:var(--accent);color:var(--text)}}
-.mb-filter-btn.active{{background:linear-gradient(135deg,#4da2ff,#6fbcf0);border-color:transparent;color:#fff}}
+.mb-filter-btn.active{{background:var(--text);border-color:transparent;color:#09090b}}
 .mb-note-del{{background:none;border:none;color:var(--text3);font-size:.75rem;cursor:pointer;padding:2px 6px;border-radius:5px;transition:all .15s;flex-shrink:0}}
 .mb-note-del:hover{{color:var(--red);background:#f8717115}}
 .mb-empty{{color:var(--text3);font-size:.82rem;text-align:center;padding:32px 0}}
@@ -3374,31 +3375,31 @@ function switchChart(tab) {
 
     <!-- Kive -->
     <g class="at-node"><title>Kive — your main agent / orchestrator. Routes every request to the right specialist.</title>
-      <rect class="at-box" x="26" y="252" width="128" height="56" rx="14" fill="#2a1840" stroke="#bc7def" stroke-width="2"/>
+      <rect class="at-box" x="26" y="252" width="128" height="56" rx="14" fill="#18181b" stroke="#fafafa" stroke-width="2"/>
       <text class="at-kname" x="90" y="277" text-anchor="middle">Kive</text>
       <text class="at-krole" x="90" y="294" text-anchor="middle">Orchestrator</text></g>
 
     <!-- research chain -->
     <g class="at-node"><title>Ken — Research Planner. Turns a topic into a lightweight search plan (sections + keywords).</title>
-      <rect class="at-box" x="242" y="45" width="116" height="50" rx="12" fill="#0e2238" stroke="#4da2ff"/>
+      <rect class="at-box" x="242" y="45" width="116" height="50" rx="12" fill="#18181b" stroke="#71717a"/>
       <text class="at-name" x="300" y="68" text-anchor="middle">Ken</text>
       <text class="at-role" x="300" y="84" text-anchor="middle">Research planner</text></g>
     <g class="at-node"><title>Glast — Web Researcher &amp; NotebookLM Curator. Researches each section of Ken's plan into a notebook.</title>
-      <rect class="at-box" x="420" y="45" width="116" height="50" rx="12" fill="#0e2238" stroke="#4da2ff"/>
+      <rect class="at-box" x="420" y="45" width="116" height="50" rx="12" fill="#18181b" stroke="#71717a"/>
       <text class="at-name" x="478" y="68" text-anchor="middle">Glast</text>
       <text class="at-role" x="478" y="84" text-anchor="middle">Web researcher</text></g>
     <g class="at-node"><title>Nelly — Report Writer. Turns the notebook into a human-readable, easy report.</title>
-      <rect class="at-box" x="590" y="45" width="116" height="50" rx="12" fill="#0e2238" stroke="#4da2ff"/>
+      <rect class="at-box" x="590" y="45" width="116" height="50" rx="12" fill="#18181b" stroke="#71717a"/>
       <text class="at-name" x="648" y="68" text-anchor="middle">Nelly</text>
       <text class="at-role" x="648" y="84" text-anchor="middle">Report writer</text></g>
     <g class="at-node"><title>Zeny — Report Generator &amp; Knowledge Curator. Saves the report as markdown to the Knowledge folder.</title>
-      <rect class="at-box" x="760" y="45" width="116" height="50" rx="12" fill="#0e2238" stroke="#4da2ff"/>
+      <rect class="at-box" x="760" y="45" width="116" height="50" rx="12" fill="#18181b" stroke="#71717a"/>
       <text class="at-name" x="818" y="68" text-anchor="middle">Zeny</text>
       <text class="at-role" x="818" y="84" text-anchor="middle">Knowledge curator</text></g>
 
     <!-- Monday -->
     <g class="at-node"><title>Monday — Python Script Master Reviewer. Security, vulnerability and architecture review.</title>
-      <rect class="at-box" x="242" y="160" width="116" height="50" rx="12" fill="#2e1b12" stroke="#f59e0b"/>
+      <rect class="at-box" x="242" y="160" width="116" height="50" rx="12" fill="#18181b" stroke="#71717a"/>
       <text class="at-name" x="300" y="183" text-anchor="middle">Monday</text>
       <text class="at-role" x="300" y="199" text-anchor="middle">Code reviewer</text></g>
     <!-- Finn -->
@@ -3408,18 +3409,18 @@ function switchChart(tab) {
       <text class="at-role" x="300" y="309" text-anchor="middle">News curator</text></g>
     <!-- Diry -->
     <g class="at-node"><title>Diry — Diary Keeper. Writes dated entries to diary.md whenever Kive does something on your behalf.</title>
-      <rect class="at-box" x="242" y="380" width="116" height="50" rx="12" fill="#2b1320" stroke="#f472b6"/>
+      <rect class="at-box" x="242" y="380" width="116" height="50" rx="12" fill="#18181b" stroke="#71717a"/>
       <text class="at-name" x="300" y="403" text-anchor="middle">Diry</text>
       <text class="at-role" x="300" y="419" text-anchor="middle">Diary keeper</text></g>
     <!-- Zammy -->
     <g class="at-node"><title>Zammy — Diary Reflection Analyst. Reads diary.md and reflects on Problems / What I Have / Reflection.</title>
-      <rect class="at-box" x="242" y="470" width="116" height="50" rx="12" fill="#261433" stroke="#c879ef"/>
+      <rect class="at-box" x="242" y="470" width="116" height="50" rx="12" fill="#18181b" stroke="#71717a"/>
       <text class="at-name" x="300" y="493" text-anchor="middle">Zammy</text>
       <text class="at-role" x="300" y="509" text-anchor="middle">Diary reflector</text></g>
 
     <!-- diary.md store (shared by Diry & Zammy) -->
     <g class="at-node"><title>diary.md — your running log. Diry writes to it; Zammy reads from it.</title>
-      <rect class="at-box" x="441" y="428" width="130" height="44" rx="10" fill="#161b24" stroke="#7c889a" stroke-dasharray="5 4"/>
+      <rect class="at-box" x="441" y="428" width="130" height="44" rx="10" fill="#18181b" stroke="#7c889a" stroke-dasharray="5 4"/>
       <text class="at-pill-text" x="506" y="455" text-anchor="middle" style="font-size:13px;fill:var(--text2);font-weight:700">&#128214; diary.md</text></g>
 
     <!-- output pills -->
@@ -3432,12 +3433,12 @@ function switchChart(tab) {
   </svg>
   </div>
   <div class="at-legend">
-    <span class="at-leg"><span class="dot" style="background:#bc7def"></span>Orchestrator</span>
-    <span class="at-leg"><span class="dot" style="background:#4da2ff"></span>Research pipeline</span>
-    <span class="at-leg"><span class="dot" style="background:#f59e0b"></span>Code review</span>
+    <span class="at-leg"><span class="dot" style="background:#fafafa"></span>Orchestrator</span>
+    <span class="at-leg"><span class="dot" style="background:#71717a"></span>Research pipeline</span>
+    <span class="at-leg"><span class="dot" style="background:#71717a"></span>Code review</span>
     <span class="at-leg"><span class="dot" style="background:#34d399"></span>News</span>
-    <span class="at-leg"><span class="dot" style="background:#f472b6"></span>Diary keeper</span>
-    <span class="at-leg"><span class="dot" style="background:#c879ef"></span>Reflection</span>
+    <span class="at-leg"><span class="dot" style="background:#71717a"></span>Diary keeper</span>
+    <span class="at-leg"><span class="dot" style="background:#71717a"></span>Reflection</span>
   </div>
 </div>
 
@@ -3455,15 +3456,15 @@ function switchChart(tab) {
 <div class="at-card-lg">
   <div class="at-head">The Team</div>
   <div class="at-cards">
-    <div class="at-card" style="--c:#bc7def"><h4>Kive<span class="at-role-tag">Main orchestrator</span></h4><p>Your main agent. Talks to you and routes every request to the right specialist sub-agent.</p></div>
-    <div class="at-card" style="--c:#4da2ff"><h4>Ken<span class="at-role-tag">Research planner</span></h4><p>Turns a topic into a lightweight search plan &mdash; sections and keywords for Glast to research within.</p><div class="at-flow">/research &middot; step 1</div></div>
-    <div class="at-card" style="--c:#4da2ff"><h4>Glast<span class="at-role-tag">Web researcher</span></h4><p>Takes Ken's plan, browses trustworthy sources, and curates findings into a NotebookLM notebook &mdash; framed around your interests.</p><div class="at-flow">/research &middot; step 2</div></div>
-    <div class="at-card" style="--c:#4da2ff"><h4>Nelly<span class="at-role-tag">Report writer</span></h4><p>Reads the notebook and writes a human-readable, easy-to-understand report.</p><div class="at-flow">/research &middot; step 3</div></div>
-    <div class="at-card" style="--c:#4da2ff"><h4>Zeny<span class="at-role-tag">Knowledge curator</span></h4><p>Generates the report from NotebookLM and saves it as markdown in your Knowledge folder.</p><div class="at-flow">/research &middot; step 4</div></div>
-    <div class="at-card" style="--c:#f59e0b"><h4>Monday<span class="at-role-tag">Code reviewer</span></h4><p>Reviews a Python script for security, vulnerabilities, and architecture &mdash; returns a structured report.</p><div class="at-flow">/review-python</div></div>
+    <div class="at-card" style="--c:#fafafa"><h4>Kive<span class="at-role-tag">Main orchestrator</span></h4><p>Your main agent. Talks to you and routes every request to the right specialist sub-agent.</p></div>
+    <div class="at-card" style="--c:#71717a"><h4>Ken<span class="at-role-tag">Research planner</span></h4><p>Turns a topic into a lightweight search plan &mdash; sections and keywords for Glast to research within.</p><div class="at-flow">/research &middot; step 1</div></div>
+    <div class="at-card" style="--c:#71717a"><h4>Glast<span class="at-role-tag">Web researcher</span></h4><p>Takes Ken's plan, browses trustworthy sources, and curates findings into a NotebookLM notebook &mdash; framed around your interests.</p><div class="at-flow">/research &middot; step 2</div></div>
+    <div class="at-card" style="--c:#71717a"><h4>Nelly<span class="at-role-tag">Report writer</span></h4><p>Reads the notebook and writes a human-readable, easy-to-understand report.</p><div class="at-flow">/research &middot; step 3</div></div>
+    <div class="at-card" style="--c:#71717a"><h4>Zeny<span class="at-role-tag">Knowledge curator</span></h4><p>Generates the report from NotebookLM and saves it as markdown in your Knowledge folder.</p><div class="at-flow">/research &middot; step 4</div></div>
+    <div class="at-card" style="--c:#71717a"><h4>Monday<span class="at-role-tag">Code reviewer</span></h4><p>Reviews a Python script for security, vulnerabilities, and architecture &mdash; returns a structured report.</p><div class="at-flow">/review-python</div></div>
     <div class="at-card" style="--c:#34d399"><h4>Finn<span class="at-role-tag">News curator</span></h4><p>Daily Thai financial news brief from Reuters, Investing.com &amp; Cointelegraph. Runs at 9 AM as a cloud routine.</p><div class="at-flow">daily brief &rarr; dashboard</div></div>
-    <div class="at-card" style="--c:#f472b6"><h4>Diry<span class="at-role-tag">Diary keeper</span></h4><p>Writes the diary &mdash; logs a dated entry every time Kive does something on your behalf.</p><div class="at-flow">writes &rarr; diary.md</div></div>
-    <div class="at-card" style="--c:#c879ef"><h4>Zammy<span class="at-role-tag">Diary reflector</span></h4><p>Reads your diary and reflects it into Problems, What I Have, and Reflection About Me.</p><div class="at-flow">reads &larr; diary.md</div></div>
+    <div class="at-card" style="--c:#71717a"><h4>Diry<span class="at-role-tag">Diary keeper</span></h4><p>Writes the diary &mdash; logs a dated entry every time Kive does something on your behalf.</p><div class="at-flow">writes &rarr; diary.md</div></div>
+    <div class="at-card" style="--c:#71717a"><h4>Zammy<span class="at-role-tag">Diary reflector</span></h4><p>Reads your diary and reflects it into Problems, What I Have, and Reflection About Me.</p><div class="at-flow">reads &larr; diary.md</div></div>
   </div>
 </div>
 """
@@ -3836,15 +3837,15 @@ function renderLpBacktest(){
   const cfg = {
     type:'line',
     data:{labels,datasets:[
-      {label:'SUI price', data:price, yAxisID:'y', borderColor:'#4da2ff', backgroundColor:'#4da2ff33', borderWidth:2, pointRadius:0, tension:.18},
-      {label:'LP range upper', data:rangeUpper, yAxisID:'y', borderColor:'#bc7def', backgroundColor:'#bc7def12', borderWidth:1.5, pointRadius:0, tension:.18, borderDash:[4,4]},
-      {label:'LP range lower', data:rangeLower, yAxisID:'y', borderColor:'#bc7def', backgroundColor:'#bc7def12', borderWidth:1.5, pointRadius:0, tension:.18, borderDash:[4,4], fill:'-1'},
-      {label:'Calculated vol %', data:volPct, yAxisID:'y1', borderColor:'#34d399', backgroundColor:'#34d39933', borderWidth:2, pointRadius:0, tension:.18},
-      {label:'Threshold %', data:thPct, yAxisID:'y1', borderColor:'#fbbf24', borderWidth:2, pointRadius:0, borderDash:[6,5]},
+      {label:'SUI price', data:price, yAxisID:'y', borderColor:'#fafafa', backgroundColor:'#fafafa33', borderWidth:2, pointRadius:0, tension:.18},
+      {label:'LP range upper', data:rangeUpper, yAxisID:'y', borderColor:'#71717a', backgroundColor:'#71717a12', borderWidth:1.5, pointRadius:0, tension:.18, borderDash:[4,4]},
+      {label:'LP range lower', data:rangeLower, yAxisID:'y', borderColor:'#71717a', backgroundColor:'#71717a12', borderWidth:1.5, pointRadius:0, tension:.18, borderDash:[4,4], fill:'-1'},
+      {label:'Calculated vol %', data:volPct, yAxisID:'y1', borderColor:'#a1a1aa', backgroundColor:'#a1a1aa33', borderWidth:2, pointRadius:0, tension:.18},
+      {label:'Threshold %', data:thPct, yAxisID:'y1', borderColor:'#52525b', borderWidth:2, pointRadius:0, borderDash:[6,5]},
       {label:'Widen range ▲', data:widenPts, type:'scatter', yAxisID:'y', parsing:false, pointRadius:5, pointHoverRadius:7, pointStyle:'triangle', rotation:0, backgroundColor:'#fb923c', borderColor:'#fff', borderWidth:1},
       {label:'Normalize / shorten ▼', data:normalizePts, type:'scatter', yAxisID:'y', parsing:false, pointRadius:5, pointHoverRadius:7, pointStyle:'triangle', rotation:180, backgroundColor:'#22c55e', borderColor:'#fff', borderWidth:1}
     ]},
-    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},zoom:{limits:{x:{minRange:60*60*1000}},pan:{enabled:true,mode:'x',modifierKey:'ctrl'},zoom:{wheel:{enabled:true},pinch:{enabled:true},drag:{enabled:true,backgroundColor:'rgba(99,102,241,0.18)',borderColor:'rgba(99,102,241,0.6)',borderWidth:1},mode:'x'}},tooltip:{callbacks:{label:(ctx)=> ctx.dataset.label==='Calculated vol %'||ctx.dataset.label==='Threshold %' ? ctx.dataset.label+': '+Number(ctx.parsed.y).toFixed(3)+'%' : ctx.dataset.label+': '+Number(ctx.parsed.y).toFixed(4)}}},scales:{x:{ticks:{color:'#94a3b8',maxTicksLimit:7},grid:{color:'#1f2937'}},y:{position:'left',ticks:{color:'#94a3b8'},grid:{color:'#1f2937'}},y1:{position:'right',ticks:{color:'#94a3b8',callback:v=>v+'%'},grid:{drawOnChartArea:false}}}}
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false},zoom:{limits:{x:{minRange:60*60*1000}},pan:{enabled:true,mode:'x',modifierKey:'ctrl'},zoom:{wheel:{enabled:true},pinch:{enabled:true},drag:{enabled:true,backgroundColor:'rgba(255,255,255,0.12)',borderColor:'rgba(255,255,255,0.4)',borderWidth:1},mode:'x'}},tooltip:{callbacks:{label:(ctx)=> ctx.dataset.label==='Calculated vol %'||ctx.dataset.label==='Threshold %' ? ctx.dataset.label+': '+Number(ctx.parsed.y).toFixed(3)+'%' : ctx.dataset.label+': '+Number(ctx.parsed.y).toFixed(4)}}},scales:{x:{ticks:{color:'#a1a1aa',maxTicksLimit:7},grid:{color:'#ffffff12'}},y:{position:'left',ticks:{color:'#a1a1aa'},grid:{color:'#ffffff12'}},y1:{position:'right',ticks:{color:'#a1a1aa',callback:v=>v+'%'},grid:{drawOnChartArea:false}}}}
   };
   if(lpBacktestChart){ lpBacktestChart.destroy(); }
   lpBacktestChart = new Chart(canvas.getContext('2d'), cfg);
@@ -3866,7 +3867,7 @@ function renderLpBacktest(){
         '</head>\n<body>\n\n'
         '<nav class="top-nav">\n'
         '  <div class="nav-left">\n'
-        '  <div class="nav-brand" onclick="goToMarket()" role="button" tabindex="0" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();goToMarket()}">Kive <span style="color:#bc7def">Dashboard</span></div>\n'
+        '  <div class="nav-brand" onclick="goToMarket()" role="button" tabindex="0" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();goToMarket()}">Kive <span style="color:var(--text3)">Dashboard</span></div>\n'
         '  <div class="page-menu" id="page-menu" role="tablist" aria-label="Dashboard sections">\n'
         '    <button type="button" class="page-menu-item active" id="page-menu-market" role="tab" aria-selected="true" data-page="market" onclick="selectPage(\'market\')">Market</button>\n'
         '    <button type="button" class="page-menu-item" role="tab" aria-selected="false" data-page="overview" onclick="selectPage(\'overview\')">Overview</button>\n'
