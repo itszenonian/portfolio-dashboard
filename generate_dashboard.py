@@ -1884,7 +1884,7 @@ def _stock_card(s):
 
 # ── HTML builder ──────────────────────────────────────────────────────────────
 
-def build_html(data):
+def build_html(data, agents_external=True):
     p      = data["prices"]
     ts     = data["timestamp"]
     updated_epoch = int(datetime.now().timestamp())
@@ -2103,7 +2103,11 @@ def build_html(data):
     proto_labels = [x[0]    for x in proto_sorted]
     proto_values = [x[1][0] for x in proto_sorted]
     _GRAY_RAMP = ["#fafafa", "#d4d4d8", "#a1a1aa", "#71717a", "#52525b", "#3f3f46", "#27272a"]
-    proto_colors = [_GRAY_RAMP[i % len(_GRAY_RAMP)] for i in range(len(proto_sorted))]
+    def _rank_gray(i: int) -> str:
+        # Value-ranked monochrome shade: largest bar is brightest, then fades darker.
+        # Clamp at the darkest shade so small bars never wrap back to white.
+        return _GRAY_RAMP[min(i, len(_GRAY_RAMP) - 1)]
+    proto_colors = [_rank_gray(i) for i in range(len(proto_sorted))]
 
     # ── Page 1: allocation bars
     categories = sorted([
@@ -3086,8 +3090,8 @@ async function mbDelete(date) {
         f"    labels: {json.dumps(hist_dates)},\n"
         f"    datasets: [\n"
         f"      {{ label: 'Total', data: {json.dumps(hist_total)}, borderColor: '#fafafa', backgroundColor: '#fafafa08', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }},\n"
-        f"      {{ label: 'Crypto', data: {json.dumps(hist_crypto)}, borderColor: '#a1a1aa', backgroundColor: '#a1a1aa08', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }},\n"
-        f"      {{ label: 'Stocks', data: {json.dumps(hist_stock)}, borderColor: '#52525b', backgroundColor: '#52525b08', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false }}\n"
+        f"      {{ label: 'Crypto', data: {json.dumps(hist_crypto)}, borderColor: '#a1a1aa', backgroundColor: '#a1a1aa08', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false, hidden: true }},\n"
+        f"      {{ label: 'Stocks', data: {json.dumps(hist_stock)}, borderColor: '#52525b', backgroundColor: '#52525b08', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 4, tension: 0.3, fill: false, hidden: true }}\n"
         f"    ]\n"
         f"  }},\n"
         f"  options: {{\n"
@@ -3116,11 +3120,11 @@ async function mbDelete(date) {
         ("Futures", cex_total,                    "#52525b"),
         ("Stocks",  stocks_total,                 "#3f3f46"),
     ]
-    for lbl, val, col in sorted(_cat_data, key=lambda x: -x[1]):
+    for i, (lbl, val, col) in enumerate(sorted(_cat_data, key=lambda x: -x[1])):
         if val > 0:
             cat_labels.append(lbl)
             cat_values.append(round(val, 2))
-            cat_colors_chart.append(col)
+            cat_colors_chart.append(_rank_gray(i))
 
     cat_js = (
         f"const catCtx = document.getElementById('cat-chart').getContext('2d');\n"
@@ -3227,8 +3231,8 @@ function switchChart(tab) {
         '<div id="pane-history" class="chart-pane active">'
         '<div class="hist-legend">'
         '<label class="hl-item" style="--c:#fafafa"><input type="checkbox" checked onchange="toggleHistLine(0,this.checked)"><span class="hl-dot"></span>Total</label>'
-        '<label class="hl-item" style="--c:#a1a1aa"><input type="checkbox" checked onchange="toggleHistLine(1,this.checked)"><span class="hl-dot"></span>Crypto</label>'
-        '<label class="hl-item" style="--c:#52525b"><input type="checkbox" checked onchange="toggleHistLine(2,this.checked)"><span class="hl-dot"></span>Stocks</label>'
+        '<label class="hl-item" style="--c:#a1a1aa"><input type="checkbox" onchange="toggleHistLine(1,this.checked)"><span class="hl-dot"></span>Crypto</label>'
+        '<label class="hl-item" style="--c:#52525b"><input type="checkbox" onchange="toggleHistLine(2,this.checked)"><span class="hl-dot"></span>Stocks</label>'
         '</div>'
         '<canvas id="history-chart" role="img" aria-label="Line chart of portfolio value over time: total, crypto and stocks"></canvas></div>'
         f'<div id="pane-protocol" class="chart-pane"><div style="height:{bar_h}px"><canvas id="bar" role="img" aria-label="Bar chart of value by protocol"></canvas></div></div>'
@@ -3570,6 +3574,9 @@ function switchChart(tab) {
         lp_graph_src = "/assets/sui_vol_backtest_7d.png"
     data_path = Path(__file__).parent / "assets" / "sui_vol_backtest_data.json"
     lp_backtest_data = data_path.read_text() if data_path.exists() else "[]"
+    # The heavy (~311KB) LP backtest blob lives only on the standalone Agents site.
+    if agents_external:
+        lp_backtest_data = "[]"
     agents_page_html = (
         '<div style="margin-bottom:22px">'
         '<h2 style="font-family:var(--font-display);font-size:1.6rem;letter-spacing:.03em;'
@@ -3853,6 +3860,22 @@ function renderLpBacktest(){
 }
 """.replace('__LP_BACKTEST_DATA__', lp_backtest_data)
 
+    # Agents lives on its own site when external; otherwise it's an in-app page.
+    if agents_external:
+        agents_nav_item = (
+            '    <a class="page-menu-item" role="tab" href="https://agents.zenonian.duckdns.org" '
+            'style="text-decoration:none">Agents</a>\n'
+        )
+        agents_page_block = ''
+        pages_literal = "['market', 'overview']"
+    else:
+        agents_nav_item = (
+            '    <button type="button" class="page-menu-item" role="tab" aria-selected="false" '
+            'data-page="agents" onclick="selectPage(\'agents\')">Agents</button>\n'
+        )
+        agents_page_block = '<div id="page-agents" class="page">\n' + agents_page_html + '\n</div>\n\n'
+        pages_literal = "['market', 'overview', 'agents']"
+
     return (
         '<!DOCTYPE html>\n<html lang="en">\n<head>\n'
         '<meta charset="UTF-8">\n'
@@ -3871,7 +3894,7 @@ function renderLpBacktest(){
         '  <div class="page-menu" id="page-menu" role="tablist" aria-label="Dashboard sections">\n'
         '    <button type="button" class="page-menu-item active" id="page-menu-market" role="tab" aria-selected="true" data-page="market" onclick="selectPage(\'market\')">Market</button>\n'
         '    <button type="button" class="page-menu-item" role="tab" aria-selected="false" data-page="overview" onclick="selectPage(\'overview\')">Overview</button>\n'
-        '    <button type="button" class="page-menu-item" role="tab" aria-selected="false" data-page="agents" onclick="selectPage(\'agents\')">Agents</button>\n'
+        + agents_nav_item +
         '  </div></div>\n'
         f'  <div class="nav-right"><div class="nav-ts" id="nav-ts" data-updated="{updated_epoch}">Updated</div>\n'
         '  <button id="privacy-btn" class="nav-refresh-btn" onclick="togglePrivacy()" title="Hide numbers" aria-label="Toggle balance visibility"><span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></span></button>\n'
@@ -3880,7 +3903,7 @@ function renderLpBacktest(){
         '</nav>\n\n'
         '<div id="page-market" class="page active">\n' + market_page_html + '\n</div>\n\n'
         '<div id="page-overview" class="page">\n' + page1 + '\n</div>\n\n'
-        '<div id="page-agents" class="page">\n' + agents_page_html + '\n</div>\n\n'
+        + agents_page_block +
         '<div id="modal-ov" class="modal-ov" onclick="closeModal()">\n'
         '  <div class="modal-box" onclick="event.stopPropagation()">\n'
         '    <div id="modal-inner"></div>\n'
@@ -3888,7 +3911,7 @@ function renderLpBacktest(){
         '</div>\n\n'
         + stock_modals + '\n\n'
         + modals_html + '\n\n'
-        '<script>\n' + JS.replace('__DASH_USER__', DASHBOARD_USER).replace('__DASH_PASS__', DASHBOARD_PASS) + '\n' + chart_js + '\n' + lp_backtest_js + '\n</script>\n'
+        '<script>\n' + JS.replace('__DASH_USER__', DASHBOARD_USER).replace('__DASH_PASS__', DASHBOARD_PASS).replace("['market', 'overview', 'agents']", pages_literal) + '\n' + chart_js + '\n' + lp_backtest_js + '\n</script>\n'
         '</body>\n</html>'
     )
 
@@ -4061,9 +4084,12 @@ def main(write_history=False):
     }
 
     print("[10/10] Generating HTML ...")
-    html = build_html(data)
-    out  = Path(__file__).parent / "portfolio_dashboard.html"
-    out.write_text(html)
+    base = Path(__file__).parent
+    # Slim main dashboard — Agents lives on its own site; heavy LP data excluded.
+    out = base / "portfolio_dashboard.html"
+    out.write_text(build_html(data, agents_external=True))
+    # Full build (incl. Agents page + LP data) — source for the standalone Agents site.
+    (base / ".full_dashboard.html").write_text(build_html(data, agents_external=False))
 
     print(f"\n{'='*54}")
     print(f"  Dashboard saved -> {out.name}")
